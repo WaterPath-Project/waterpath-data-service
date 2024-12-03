@@ -1,0 +1,71 @@
+{
+    "title": "Data Schema for wastewater treatment",
+    "description": "This schema is used for simulations at a global scale (0.5 degree resolution).",
+    "fields": [
+        {
+            "name": "gid",
+            "type": "string",
+            "title": "Fraction for GADM ID for country/subarea",
+            "description": ""
+        },
+        {
+            "name": "FractionPrimarytreatment",
+            "type": "number",
+            "title": "Fraction for Primary treatment",
+            "description": "",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "FractionSecondarytreatment",
+            "type": "number",
+            "title": "Fraction for Secondary treatment",
+            "description": "",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "FractionTertiarytreatment",
+            "type": "number",
+            "title": "Fraction for Tertiary treatment",
+            "description": "",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "FractionPonds",
+            "type": "number",
+            "title": "Fraction for Ponds",
+            "description": "",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        }
+    ],
+    "missingValues": [
+        "",
+        "N/A",
+        "NA",
+        "n/a"
+    ],
+    "foreignKeys": [
+        {
+          "fields": "gid",
+          "reference": {
+            "resource": "population",
+            "fields": "gid"
+          }
+        }
+      ]
+}

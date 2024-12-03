@@ -1,0 +1,36 @@
+{
+  "resources": [
+    {
+      "name": "population",
+      "type": "table",
+      "path": "default\\population.csv",
+      "scheme": "file",
+      "format": "csv",
+      "mediatype": "text/csv"
+    },
+    {
+      "name": "sanitation",
+      "type": "table",
+      "path": "default\\sanitation.csv",
+      "scheme": "file",
+      "format": "csv",
+      "mediatype": "text/csv"
+    },
+    {
+      "name": "waste_management",
+      "type": "table",
+      "path": "default\\waste_management.csv",
+      "scheme": "file",
+      "format": "csv",
+      "mediatype": "text/csv"
+    },
+    {
+      "name": "treatment",
+      "type": "table",
+      "path": "default\\treatment.csv",
+      "scheme": "file",
+      "format": "csv",
+      "mediatype": "text/csv"
+    }
+  ]
+}

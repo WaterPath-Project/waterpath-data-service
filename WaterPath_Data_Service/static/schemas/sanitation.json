@@ -1,0 +1,313 @@
+{
+    "title": "Data Schema for sanitation fractions",
+    "description": "This schema defines the properties for sanitation fractions that summarise the sanitation situation at a given geographical area.",
+    "fields": [
+        {
+            "name": "gid",
+            "type": "string",
+            "title": "GID",
+            "description": "GID links to the administrative areas defined in the populatikon portion of the data."
+        },
+        {
+            "name": "flushSewer_urb",
+            "type": "number",
+            "title": "Flush toilets (sewered) - urban",
+            "description": "Fraction of people connected to flush sewer in urban areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "flushSewer_rur",
+            "type": "number",
+            "title": "Flush toilets (sewered)- rural",
+            "description": "Fraction of people connected to flush sewer in rural areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "flushSeptic_urb",
+            "type": "number",
+            "title": "Flushed septic tanks - urban",
+            "description": "Fraction of people using flush septic tanks in rural areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "flushSeptic_rur",
+            "type": "number",
+            "title": "Flushed septic tanks - rural",
+            "description": "Fraction of people using flush septic tanks in rural areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "flushPit_urb",
+            "type": "number",
+            "title": "Flush pits - urban",
+            "description": "Fraction of people using flush pit sanitation in urban areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "flushPit_rur",
+            "type": "number",
+            "title": "Flush pits - rural",
+            "description": "Fraction of people using flush pit sanitation in rural areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "flushOpen_urb",
+            "type": "number",
+            "title": "Flushed Open - urban",
+            "description": "Fraction of people using flush open sanitation in urban areas",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "flushOpen_rur",
+            "type": "number",
+            "title": "Flushed Open - rural",
+            "description": "Fraction of people using flush open sanitation in rural areas",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "flushUnknown_urb",
+            "type": "number",
+            "title": "Flush Unknown - urban",
+            "description": "Fraction of people using flush to unknown place in urban areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "flushUnknown_rur",
+            "type": "number",
+            "title": "Flush Unknown - rural",
+            "description": "Fraction of people using flush to unknown place in rural areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "pitSlab_urb",
+            "type": "number",
+            "title": "Pit slabs - urban",
+            "description": "Fraction of people using pits with slab sanitation in urban areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "pitSlab_rur",
+            "type": "number",
+            "title": "Pit slabs - rural",
+            "description": "Fraction of people using pits with slab sanitation in rural areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "pitNoSlab_urb",
+            "type": "number",
+            "title": "Pits (no slabs) - urban",
+            "description": "Fraction of people using open pit sanitation in urban areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "pitNoSlab_rur",
+            "type": "number",
+            "title": "Pits (no slabs) - rural",
+            "description": "Fraction of people using open pit sanitation in rural areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "compostingToilet_urb",
+            "type": "number",
+            "title": "Composting Toilets - urban",
+            "description": "Fraction of people using composting toilets in urban areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "compostingToilet_rur",
+            "type": "number",
+            "title": "Composting Toilets - rural",
+            "description": "Fraction of people using composting toilets in rural areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "bucketLatrine_urb",
+            "type": "number",
+            "title": "Bucket Latrines - urban",
+            "description": "Fraction of people using bucket latrines in urban areas",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "bucketLatrine_rur",
+            "type": "number",
+            "title": "Bucket Latrines - rural",
+            "description": "Fraction of people using bucket latrines in rural areas",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "containerBased_urb",
+            "type": "number",
+            "title": "Container Based - urban",
+            "description": "Fraction of people using container based sanitation in urban areas",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "containerBased_rur",
+            "type": "number",
+            "title": "Container Based - rural",
+            "description": "Fraction of people using container based sanitation in rural areas",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "hangingToilet_urb",
+            "type": "number",
+            "title": "Hanging toilets - urban",
+            "description": "Fraction of people using hanging toilets/latrines in urban areas",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "hangingToilet_rur",
+            "type": "number",
+            "title": "Hanging toilets - rural",
+            "description": "Fraction of people using hanging toilets/latrines in rural areas",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "openDefecation_urb",
+            "type": "number",
+            "title": "Open Defecation - urban",
+            "description": "Fraction of people using open defecation sanitation in urban areas",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "openDefecation_rur",
+            "type": "number",
+            "title": "Open Defecation - rural",
+            "description": "Fraction of people using open defecation sanitation in rural areas",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "other_urb",
+            "type": "number",
+            "title": "Other - urban",
+            "description": "Fraction of people using other sanitation type in urban areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "other_rur",
+            "type": "number",
+            "title": "Other - rural",
+            "description": "Fraction of people using other sanitation type in rural areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        }
+    ],
+    "missingValues": [
+        "",
+        "N/A",
+        "NA",
+        "n/a"
+    ],
+    "foreignKeys": [
+        {
+          "fields": "gid",
+          "reference": {
+            "resource": "population",
+            "fields": "gid"
+          }
+        }
+      ]
+}

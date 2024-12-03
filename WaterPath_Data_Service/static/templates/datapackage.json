@@ -1,0 +1,44 @@
+{
+    "name": "package",
+    "title": "Example Data Package - Human Emissions",
+    "description": "A data package containing inputs for the GloWPa model, to run simulations for the Human Emissions.",
+    "resources": [
+        {
+            "name": "population",
+            "type": "table",
+            "path": "population.csv",
+            "scheme": "file",
+            "format": "csv",
+            "mediatype": "text/csv",
+            "schema": "../population_schema.json"
+        },
+        {
+            "name": "sanitation",
+            "type": "table",
+            "path": "sanitation.csv",
+            "scheme": "file",
+            "format": "csv",
+            "mediatype": "text/csv",
+            "schema": "../sanitation_schema.json"
+        },
+        {
+            "name": "waste_management",
+            "type": "table",
+            "path": "waste_management.csv",
+            "scheme": "file",
+            "format": "csv",
+            "mediatype": "text/csv",
+            "schema": "../waste_management_schema.json"
+        },
+        {
+            "name": "treatment",
+            "type": "table",
+            "path": "treatment.csv",
+            "scheme": "file",
+            "format": "csv",
+            "mediatype": "text/csv",
+            "schema": "../treatment.json"
+        }
+
+    ]
+}
