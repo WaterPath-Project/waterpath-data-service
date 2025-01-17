@@ -96,18 +96,15 @@ async def generate_input_data_package(session_id: str, gids: str):
                 description = {
                     "name": schema,
                     "type": "table",
-                    "path": str(
-                        Path(
-                            project_folder / path / default_path / file_name,
-                        ).relative_to(project_folder / path),
-                    ),
+                    "path": str(Path(project_folder / path / default_path / filepath).relative_to(project_folder / path)),
                     "format": "csv",
                     "mediatype": "text/csv",
                     "scheme": "file",
                 }
                 resource_descriptions.append(description)
             resource_input = {"resources": resource_descriptions}
-            package = Package(*resource_input)
+            print(resource_input)
+            package = Package(resource_input)
             package.to_json(str(project_folder / path / "datapackage.json"))
             # for r in package.resources:
             #     r.schema = str(Path(project_folder / path / schemas_path / schema_name).relative_to(project_folder / path))
