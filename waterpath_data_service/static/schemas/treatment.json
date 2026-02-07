@@ -1,0 +1,54 @@
+{
+    "title": "Data Schema for high-resolution wastewater treatment.",
+    "description": "This schema is used for high-resolution model simulations, typically at a sub-country level.",
+    "fields": [
+        {
+            "name": "lon",
+            "type": "number",
+            "title": "Longitude of Wastewater Treatment Plant",
+            "description": "",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "lat",
+            "type": "number",
+            "title": "Latitude of Wastewater Treatment Plant",
+            "description": "",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "capacity",
+            "type": "number",
+            "title": "Number of people connected to the Wastewater Treatment Plant",
+            "description": "",
+            "constraints": {
+                "minimum": 0
+            }
+        },
+        {
+            "name": "treatment_type",
+            "type": "string",
+            "title": "Type of Wastewater treatment",
+            "description": "Secondary: primary + secondary, tertiary: primary + secondary + tertiary",
+            "categories": [
+                "primary",
+                "secondary",
+                "tertiary"
+            ]
+        }
+    ],
+    "missingValues": [
+        "",
+        "N/A",
+        "NA",
+        "n/a"
+    ]
+}

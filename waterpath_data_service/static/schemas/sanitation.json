@@ -1,0 +1,531 @@
+{
+    "title": "Data Schema for sanitation fractions",
+    "description": "This schema defines the properties for sanitation fractions that summarise the sanitation situation at a given geographical area.",
+    "fields": [
+        {
+            "name": "gid",
+            "type": "string",
+            "title": "GADM ID for country/subarea",
+            "description": "The GID starts with the three letter ISO 3166-1 alpha-3 country code. If there are subdivisions these are identified by a number from 1 to n."
+        },
+        {
+            "name": "flushSewer_urb",
+            "type": "number",
+            "title": "Flush toilets (sewered) - urban",
+            "description": "Fraction of people connected to flush sewer in urban areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "flushSeptic_urb",
+            "type": "number",
+            "title": "Flushed septic tanks - urban",
+            "description": "Fraction of people using flush septic tanks in rural areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "flushPit_urb",
+            "type": "number",
+            "title": "Flush pits - urban",
+            "description": "Fraction of people using flush pit sanitation in urban areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "flushOpen_urb",
+            "type": "number",
+            "title": "Flushed Open - urban",
+            "description": "Fraction of people using flush open sanitation in urban areas",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "flushUnknown_urb",
+            "type": "number",
+            "title": "Flush Unknown - urban",
+            "description": "Fraction of people using flush to unknown place in urban areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "pitSlab_urb",
+            "type": "number",
+            "title": "Pit slabs - urban",
+            "description": "Fraction of people using pits with slab sanitation in urban areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "pitNoSlab_urb",
+            "type": "number",
+            "title": "Pits (no slabs) - urban",
+            "description": "Fraction of people using open pit sanitation in urban areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "bucketLatrine_urb",
+            "type": "number",
+            "title": "Bucket Latrines - urban",
+            "description": "Fraction of people using bucket latrines in urban areas",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "hangingToilet_urb",
+            "type": "number",
+            "title": "Hanging toilets - urban",
+            "description": "Fraction of people using hanging toilets/latrines in urban areas",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "openDefecation_urb",
+            "type": "number",
+            "title": "Open Defecation - urban",
+            "description": "Fraction of people using open defecation sanitation in urban areas",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "containerBased_urb",
+            "type": "number",
+            "title": "Container Based - urban",
+            "description": "Fraction of people using container based sanitation in urban areas",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "compostingToilet_urb",
+            "type": "number",
+            "title": "Composting Toilets - urban",
+            "description": "Fraction of people using composting toilets in urban areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "other_urb",
+            "type": "number",
+            "title": "Other - urban",
+            "description": "Fraction of people using other sanitation type in urban areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "coverBury_urb",
+            "type": "number",
+            "title": "Cover Bury - urban",
+            "description": "",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "sewageTreated_urb",
+            "type": "number",
+            "title": "Sewage treated - urban",
+            "description": "Fraction the sewerage system which will have waste water treatment in urban areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "fecalSludgeTreated_urb",
+            "type": "number",
+            "title": "Fecal Sludge treated - urban",
+            "description": "Fraction the fecal sludge which will have treatment in urban areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "isWatertight_urb",
+            "type": "number",
+            "title": "Watertight - urban",
+            "description": "",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "hasLeach_urb",
+            "type": "number",
+            "title": "Leach - urban",
+            "description": "",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "onsiteDumpedland_urb",
+            "type": "number",
+            "title": "Onsite Dumpled land - urban",
+            "description": "fraction of fecal sludge which is dumped on land in urban areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "emptyFrequency_urb",
+            "type": "number",
+            "title": "Emptying frequency - urban",
+            "description": "",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0
+            }
+        },
+        {
+            "name": "pitAdditive_urb",
+            "type": "number",
+            "title": "Pit additive - urban",
+            "description": "",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "urine_urb",
+            "type": "number",
+            "title": "Urine - urban",
+            "description": "",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "twinPits_urb",
+            "type": "number",
+            "title": "Twin pits - urban",
+            "description": "",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "flushSewer_rur",
+            "type": "number",
+            "title": "Flush toilets (sewered)- rural",
+            "description": "Fraction of people connected to flush sewer in rural areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "flushSeptic_rur",
+            "type": "number",
+            "title": "Flushed septic tanks - rural",
+            "description": "Fraction of people using flush septic tanks in rural areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "flushPit_rur",
+            "type": "number",
+            "title": "Flush pits - rural",
+            "description": "Fraction of people using flush pit sanitation in rural areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "flushOpen_rur",
+            "type": "number",
+            "title": "Flushed Open - rural",
+            "description": "Fraction of people using flush open sanitation in rural areas",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "flushUnknown_rur",
+            "type": "number",
+            "title": "Flush Unknown - rural",
+            "description": "Fraction of people using flush to unknown place in rural areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "pitSlab_rur",
+            "type": "number",
+            "title": "Pit slabs - rural",
+            "description": "Fraction of people using pits with slab sanitation in rural areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "pitNoSlab_rur",
+            "type": "number",
+            "title": "Pits (no slabs) - rural",
+            "description": "Fraction of people using open pit sanitation in rural areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "bucketLatrine_rur",
+            "type": "number",
+            "title": "Bucket Latrines - rural",
+            "description": "Fraction of people using bucket latrines in rural areas",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "hangingToilet_rur",
+            "type": "number",
+            "title": "Hanging toilets - rural",
+            "description": "Fraction of people using hanging toilets/latrines in rural areas",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "openDefecation_rur",
+            "type": "number",
+            "title": "Open Defecation - rural",
+            "description": "Fraction of people using open defecation sanitation in rural areas",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "containerBased_rur",
+            "type": "number",
+            "title": "Container Based - rural",
+            "description": "Fraction of people using container based sanitation in rural areas",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "compostingToilet_rur",
+            "type": "number",
+            "title": "Composting Toilets - rural",
+            "description": "Fraction of people using composting toilets in rural areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "other_rur",
+            "type": "number",
+            "title": "Other - rural",
+            "description": "Fraction of people using other sanitation type in rural areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "coverBury_rur",
+            "type": "number",
+            "title": "Cover Bury - rural",
+            "description": "",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "sewageTreated_rur",
+            "type": "number",
+            "title": "Sewage treated - rural",
+            "description": "Fraction the sewerage system which will have waste water treatment in rural areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "fecalSludgeTreated_rur",
+            "type": "number",
+            "title": "Fraction the fecal sludge which will have treatment in rural areas.",
+            "description": "",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "isWatertight_rur",
+            "type": "number",
+            "title": "Watertight - rural",
+            "description": "",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "hasLeach_rur",
+            "type": "number",
+            "title": "Leach - rural",
+            "description": "",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "onsiteDumpedland_rur",
+            "type": "number",
+            "title": "Onsite Dumpled land - urban",
+            "description": "fraction of fecal sludge which is dumped on land in rural areas.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "emptyFrequency_rur",
+            "type": "number",
+            "title": "Emptying frequency - rural",
+            "description": "",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0
+            }
+        },
+        {
+            "name": "pitAdditive_rur",
+            "type": "number",
+            "title": "Pit additive - rural",
+            "description": "",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "urine_rur",
+            "type": "number",
+            "title": "Urine - rural",
+            "description": "",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "twinPits_rur",
+            "type": "number",
+            "title": "Twin pits - rural",
+            "description": "",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        }
+    ],
+    "missingValues": [
+        "",
+        "N/A",
+        "NA",
+        "n/a"
+    ],
+    "foreignKeys": [
+        {
+          "fields": "alpha3",
+          "reference": {
+            "resource": "population",
+            "fields": "iso3"
+          }
+        }
+      ]
+}

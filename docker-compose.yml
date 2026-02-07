@@ -1,0 +1,28 @@
+services:
+  api: &main_app
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+    image: WaterPath_Data_Service:${WATERPATH_DATA_SERVICE_VERSION:-latest}
+    restart: always
+    env_file:
+      - .env
+    labels:
+      # Enables traefik for this container.
+      - traefik.enable=true
+      - traefik.http.routers.WaterPath_Data_Service.rule=Host(`${WATERPATH_DATA_SERVICE_TRAEFIK_HOST:-WaterPath_Data_Service.localhost}`)
+      - traefik.http.routers.WaterPath_Data_Service.entrypoints=http
+      - traefik.http.routers.WaterPath_Data_Service.service=WaterPath_Data_Service
+      - traefik.http.services.WaterPath_Data_Service.loadbalancer.server.port=${WATERPATH_DATA_SERVICE_PORT:-8000}
+    networks:
+      - default
+      - traefik-shared
+    environment:
+      WATERPATH_DATA_SERVICE_HOST: 0.0.0.0
+
+
+
+networks:
+  # Network for traefik.
+  traefik-shared:
+    name: traefik-shared

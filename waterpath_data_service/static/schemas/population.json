@@ -1,0 +1,84 @@
+{
+    "title": "Data Schema for population, demographics and regional data",
+    "description": "This schema defines the properties for the geographic area and its respective population, used for simulation purposes.",
+    "fields": [
+        {
+            "name": "iso",
+            "type": "string",
+            "title": "Identifier",
+            "description": "An identifier for the tabular data row."
+        },
+        {
+            "name": "gid",
+            "type": "string",
+            "title": "GADM ID for country/subarea",
+            "description": "The GID starts with the three letter ISO 3166-1 alpha-3 country code. If there are subdivisions these are identified by a number from 1 to n."
+        },
+        {
+            "name": "iso3",
+            "type": "string",
+            "title": "ISO-3166-2 code",
+            "description": "ISO-3166-2 code links to the countries referenced by the populatikon portion of the data."
+        },
+        {
+            "name": "subarea",
+            "type": "string",
+            "title": "Administrative area",
+            "description": "Name of administrative area (country/subcountry region)."
+        },
+        {
+            "name": "hdi",
+            "type": "number",
+            "title": "HDI",
+            "description": "Human development index of admininistrative area",
+            "float_number": true,
+            "schema": {
+                "multipleOf": 0.001
+            },
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "population",
+            "type": "integer",
+            "title": "Population of the country/area",
+            "description": "Total population in administrative area used as reference for correcting gridded population data.",
+            "constraints": {
+                "minimum": 0
+            }
+        },
+        {
+            "name": "fraction_urban_pop",
+            "type": "number",
+            "title": "Fraction of urban population",
+            "description": "Fraction of urban population in administrative area for correcting gridded population data",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "fraction_pop_under5",
+            "type": "number",
+            "float_number": true,
+            "title": "Fraction under 5",
+            "description": "Fraction population younger than 5 years.",
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        }
+    ],
+    "missingValues": [
+        "",
+        "N/A",
+        "NA",
+        "n/a"
+    ],
+    "primaryKey": [
+        "gid"
+    ]
+}
