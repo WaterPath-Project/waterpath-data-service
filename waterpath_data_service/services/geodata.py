@@ -10,17 +10,19 @@ from rasterio.transform import from_origin
 import numpy as np
 
 
-def geonames(admin: str, level: int) -> list:
+def geonames(admin: str, level: int) -> pd.DataFrame:
 
     areas = [x.strip(" ") for x in admin.split(",")]
     names = []
     for area in areas:
         name = pygadm.Names(admin=area, content_level=level)
+        # Each area should return exactly one name at its own level; extend to
+        # collect them all and then zip with areas below.
         names.extend(name["NAME_" + str(level)].tolist())
 
-    names_df = pd.DataFrame(columns=["gid", "name"])
-    names_df["gid"] = areas
-    names_df["name"] = names
+    # Build the DataFrame directly – avoids the pandas 2.x error raised when
+    # assigning a list to a column of a 0-row DataFrame.
+    names_df = pd.DataFrame({"gid": areas, "name": names[:len(areas)]})
     return names_df
 
 
@@ -37,15 +39,27 @@ def shapefile(areas: str, path: str) -> str:
     return file_path
 
 
-def geofilter(data: str, path: str) -> str:
+def geofilter(data: pd.DataFrame, path: str) -> pd.DataFrame:
+    """Spatially filter a WWTP DataFrame to points inside the session boundary.
+
+    Args:
+        data: A pandas DataFrame with at least ``lon`` and ``lat`` columns.
+        path: Session directory path (must contain ``geodata/geodata.shp``).
+
+    Returns:
+        A DataFrame of rows whose coordinates fall within the session boundary,
+        with the ``alpha3`` column removed.
+    """
     geodata_path = str(Path(path)) + os.sep + "geodata"
     shapefile_path = geodata_path + os.sep + "geodata.shp"
     polygon_gdf = gpd.read_file(shapefile_path)
-    df = pd.read_json(data)
+
+    # Reset index so the geometry list aligns positionally with DataFrame rows.
+    df = data.reset_index(drop=True)
     geometry = [Point(xy) for xy in zip(df["lon"], df["lat"])]
     points_gdf = gpd.GeoDataFrame(df, geometry=geometry, crs=polygon_gdf.crs)
-    points_within = points_gdf[points_gdf.within(polygon_gdf.unary_union)]
-    points_within = points_within.drop(columns=["alpha3", "geometry"])
+    points_within = points_gdf[points_gdf.within(polygon_gdf.unary_union)].copy()
+    points_within = points_within.drop(columns=["alpha3", "geometry"], errors="ignore")
     return points_within
 
 def resample_raster(path: str):

@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: ./Dockerfile
-    image: WaterPath_Data_Service:${WATERPATH_DATA_SERVICE_VERSION:-latest}
+    image: waterpath_data_service:${WATERPATH_DATA_SERVICE_VERSION:-latest}
     restart: always
     env_file:
       - .env

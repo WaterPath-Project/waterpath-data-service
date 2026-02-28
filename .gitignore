@@ -142,8 +142,8 @@ dmypy.json
 cython_debug/
 
 waterpath_data_service/data/*
-waterpath_data_service/web/api/data/*
-waterpath_data_service/static/data/*
+waterpath_data_service/static/data/FuturePop*
+waterpath_data_service/static/data/global_pop*
 
 # Geodata files
 *.shp

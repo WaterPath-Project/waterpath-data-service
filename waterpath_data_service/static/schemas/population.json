@@ -15,10 +15,10 @@
             "description": "The GID starts with the three letter ISO 3166-1 alpha-3 country code. If there are subdivisions these are identified by a number from 1 to n."
         },
         {
-            "name": "iso3",
+            "name": "iso_country",
             "type": "string",
             "title": "ISO-3166-2 code",
-            "description": "ISO-3166-2 code links to the countries referenced by the populatikon portion of the data."
+            "description": "ISO-3166-2 code links to the countries referenced by the population portion of the data."
         },
         {
             "name": "subarea",

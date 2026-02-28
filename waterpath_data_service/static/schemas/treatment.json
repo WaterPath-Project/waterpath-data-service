@@ -1,48 +1,45 @@
 {
-    "title": "Data Schema for high-resolution wastewater treatment.",
-    "description": "This schema is used for high-resolution model simulations, typically at a sub-country level.",
+    "title": "Wastewater treatment schema",
+    "description": "This schema is used for simulations at a global scale (0.5 degree resolution).",
     "fields": [
         {
-            "name": "lon",
-            "type": "number",
-            "title": "Longitude of Wastewater Treatment Plant",
-            "description": "",
-            "float_number": true,
-            "constraints": {
-                "minimum": 0,
-                "maximum": 1
-            }
-        },
-        {
-            "name": "lat",
-            "type": "number",
-            "title": "Latitude of Wastewater Treatment Plant",
-            "description": "",
-            "float_number": true,
-            "constraints": {
-                "minimum": 0,
-                "maximum": 1
-            }
-        },
-        {
-            "name": "capacity",
-            "type": "number",
-            "title": "Number of people connected to the Wastewater Treatment Plant",
-            "description": "",
-            "constraints": {
-                "minimum": 0
-            }
-        },
-        {
-            "name": "treatment_type",
+            "name": "gid",
             "type": "string",
-            "title": "Type of Wastewater treatment",
-            "description": "Secondary: primary + secondary, tertiary: primary + secondary + tertiary",
-            "categories": [
-                "primary",
-                "secondary",
-                "tertiary"
-            ]
+            "title": "Fraction for GADM ID for country/subarea",
+            "description": ""
+        },
+        {
+            "name": "FractionPrimarytreatment",
+            "type": "number",
+            "title": "Fraction for Primary treatment",
+            "description": "",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "FractionSecondarytreatment",
+            "type": "number",
+            "title": "Fraction for Secondary treatment",
+            "description": "",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "FractionTertiarytreatment",
+            "type": "number",
+            "title": "Fraction for Tertiary treatment",
+            "description": "",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
         }
     ],
     "missingValues": [
@@ -50,5 +47,14 @@
         "N/A",
         "NA",
         "n/a"
-    ]
+    ],
+    "foreignKeys": [
+        {
+          "fields": "gid",
+          "reference": {
+            "resource": "population",
+            "fields": "gid"
+          }
+        }
+      ]
 }
