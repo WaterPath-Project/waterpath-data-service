@@ -12,7 +12,7 @@ import numpy as np
 
 def geonames(admin: str, level: int) -> pd.DataFrame:
 
-    areas = [x.strip(" ") for x in admin.split(",")]
+    areas = [x.strip() for x in admin.split(",") if x.strip()]
     names = []
     for area in areas:
         name = pygadm.Names(admin=area, content_level=level)

@@ -4,8 +4,11 @@ prepare_spatial.py
 Python equivalent of the R prepare.R spatial functions for generating:
 
   - ``isoraster.tif``        – integer raster where every pixel holds the
-                               sequential 1-based index of the shapefile polygon
-                               it falls in.
+                               ``iso`` value of the polygon it falls in,
+                               as recorded in ``isodata.csv``.  Downstream
+                               code joins raster pixels to CSV rows via
+                               ``isodata["iso"] == pixel_value``, then
+                               resolves the string area id from ``isodata["gid"]``.
   - ``human/pop_urban.tif``  – gridded urban population count.
   - ``human/pop_rural.tif``  – gridded rural population count.
 
@@ -58,7 +61,7 @@ from __future__ import annotations
 import logging
 import math
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List
 
 import fiona
 import numpy as np
@@ -88,7 +91,8 @@ def prepare_spatial_inputs(
     ----------
     geodata_path:
         Path to the case-study ``.shp`` file (GADM-style, any admin level).
-        The shapefile features are enumerated 1-to-N to form the isoraster.
+        Each feature is matched to ``isodata.csv`` via its GID property; the
+        matching row's ``iso`` integer becomes the raster burn value.
     isodata_path:
         Path to the case-study ``isodata.csv``.  Must contain at minimum:
         - ``iso``                – polygon identifier matching the shapefile's
@@ -129,35 +133,53 @@ def prepare_spatial_inputs(
     n_features = len(features)
     logger.info("Shapefile: %d features loaded from %s", n_features, geodata_path)
 
-    # Sequential 1-based index – mirrors R's ``seq(1, nrow(vect_domain))``
-    iso_ids = list(range(1, n_features + 1))
-
-    # Map isoraster_id → the GID value used in isodata.csv ("iso" column).
-    # Priority: GID_3 > GID_2 > GID_1 > GID_0 (highest admin level present).
-    id_to_gid: Dict[int, str] = {}
-    for idx, feat in enumerate(features):
-        props = feat["properties"]
-        gid = (
-            props.get("GID_3")
-            or props.get("GID_2")
-            or props.get("GID_1")
-            or props.get("GID_0")
-            or props.get("iso")
-            or str(idx + 1)
-        )
-        id_to_gid[iso_ids[idx]] = str(gid).strip()
-
     # ------------------------------------------------------------------
-    # Step 2 – Load urban fraction from isodata.csv
+    # Step 2 – Load isodata.csv.
+    #
+    # The iso column holds an integer zone index that matches the pixel
+    # values burned into isoraster.tif.  The gid column holds the string
+    # GID identifier.  This lets downstream code join the raster back to
+    # the CSV using isodata["iso"] == raster_pixel_value, then resolve to
+    # the string area id via isodata["gid"].
     # ------------------------------------------------------------------
     isodata_df = pd.read_csv(isodata_path, dtype=str)
     isodata_df["fraction_urban_pop"] = pd.to_numeric(
         isodata_df["fraction_urban_pop"], errors="coerce"
     )
-    # Build lookup: GID value → urban fraction
-    gid_to_furban: Dict[str, float] = dict(
-        zip(isodata_df["iso"].str.strip(), isodata_df["fraction_urban_pop"])
-    )
+
+    # gid string → iso integer (the value to burn into the raster)
+    gid_to_iso: Dict[str, int] = {}
+    for _, row in isodata_df.iterrows():
+        try:
+            gid_to_iso[str(row["gid"]).strip()] = int(row["iso"])
+        except (ValueError, TypeError):
+            pass
+
+    # gid string → urban fraction (for poulating furban_arr in step 5)
+    gid_to_furban: Dict[str, float] = {}
+    for _, row in isodata_df.iterrows():
+        frac = row["fraction_urban_pop"]
+        if pd.notna(frac):
+            gid_to_furban[str(row["gid"]).strip()] = float(frac)
+
+    # Per shapefile feature: resolve GID string, look up iso integer burn value.
+    # Priority: GID_3 > GID_2 > GID_1 > GID_0 (highest admin level present).
+    iso_ids: List[int] = []
+    id_to_gid: Dict[int, str] = {}
+    for idx, feat in enumerate(features):
+        props = feat["properties"]
+        gid = str(
+            props.get("GID_3")
+            or props.get("GID_2")
+            or props.get("GID_1")
+            or props.get("GID_0")
+            or str(idx + 1)
+        ).strip()
+        # Burn the iso integer from isodata.csv; fall back to feature order
+        # if this polygon's GID is not present in isodata.csv.
+        iso_val = gid_to_iso.get(gid, idx + 1)
+        iso_ids.append(iso_val)
+        id_to_gid[iso_val] = gid
 
     # ------------------------------------------------------------------
     # Step 3 – Determine target grid extent and transform
@@ -222,7 +244,7 @@ def prepare_spatial_inputs(
     furban_arr = np.full((height, width), np.nan, dtype=np.float32)
     missing_gids = set()
     for iso_id, gid in id_to_gid.items():
-        frac = gid_to_furban.get(gid)
+        frac = gid_to_furban.get(gid)  # look up via string gid, not iso int
         if frac is not None and np.isfinite(frac):
             furban_arr[isoraster_arr == iso_id] = float(frac)
         else:
@@ -243,10 +265,16 @@ def prepare_spatial_inputs(
     # Step 7 – Split into urban / rural
     # ------------------------------------------------------------------
     NODATA_F = -9999.0
-    valid = np.isfinite(furban_arr) & np.isfinite(pop_arr)
 
-    pop_urban_arr = np.where(valid, furban_arr * pop_arr, NODATA_F).astype(np.float32)
-    pop_rural_arr = np.where(valid, (1.0 - furban_arr) * pop_arr, NODATA_F).astype(np.float32)
+    # Within the domain, treat NaN population (e.g. water pixels in the
+    # source raster) as zero so no polygon ends up with nodata holes.
+    pop_arr_domain = np.where(domain_mask & ~np.isfinite(pop_arr), 0.0, pop_arr)
+
+    # A pixel is valid when both urb-fraction and population are known.
+    valid = np.isfinite(furban_arr) & np.isfinite(pop_arr_domain)
+
+    pop_urban_arr = np.where(valid, furban_arr * pop_arr_domain, NODATA_F).astype(np.float32)
+    pop_rural_arr = np.where(valid, (1.0 - furban_arr) * pop_arr_domain, NODATA_F).astype(np.float32)
 
     pop_urban_path = out_dir / "pop_urban.tif"
     pop_rural_path = out_dir / "pop_rural.tif"
@@ -302,10 +330,11 @@ def _resample_pop_raster(
 ) -> np.ndarray:
     """Resample any population-count raster to the target grid.
 
-    Converts source counts → density (pop / km²) → bilinear resample →
-    counts per target cell.  This preserves total population when aggregating
-    from a fine to a coarser grid, matching R's ``prepare_pop_gridded()``
-    with ``method = "bilinear"`` on a density raster.
+    Converts source counts → density (pop / km²) → average resample →
+    counts per target cell.  ``Resampling.average`` is used instead of
+    bilinear because it skips NaN source pixels when computing each
+    destination pixel; bilinear would propagate a single nodata/edge NaN
+    to all four neighbouring destination pixels and blank out the domain.
     """
     dst_xmin, dst_ymin, dst_xmax, dst_ymax = rasterio.transform.array_bounds(
         dst_height, dst_width, dst_transform
@@ -313,12 +342,25 @@ def _resample_pop_raster(
 
     with rasterio.open(pop_raster_path) as src:
         window = window_from_bounds(dst_xmin, dst_ymin, dst_xmax, dst_ymax, src.transform)
-        src_data = src.read(1, window=window).astype(np.float32)
+        # boundless=True ensures the read array always matches the window
+        # dimensions, even when the window extends outside the source raster.
+        # fill_value=0 keeps uninhabited out-of-extent cells as zero population
+        # (they will be masked to NaN by the nodata step below or via nan
+        # propagation in the density conversion).
+        src_data = src.read(
+            1, window=window, boundless=True, fill_value=0
+        ).astype(np.float32)
         src_transform = src.window_transform(window)
         src_nodata = src.nodata
 
     if src_nodata is not None:
-        src_data[src_data == src_nodata] = np.nan
+        # Use a tolerance-based comparison (float equality is unreliable) and
+        # also catch common large-negative sentinel values.
+        nodata_mask = (
+            np.isclose(src_data, float(src_nodata), rtol=1e-5, atol=0)
+            | (src_data < -1e10)
+        )
+        src_data[nodata_mask] = np.nan
 
     src_h, src_w = src_data.shape
     src_cell_area = _cell_area_km2(src_transform, src_h, src_w)
@@ -333,7 +375,10 @@ def _resample_pop_raster(
         src_crs=crs,
         dst_transform=dst_transform,
         dst_crs=crs,
-        resampling=Resampling.bilinear,
+        # Resampling.average skips NaN source pixels when computing each dest
+        # pixel, so a single nodata/edge NaN in the source does NOT propagate
+        # to destroy its four neighbouring dest pixels (bilinear would do that).
+        resampling=Resampling.average,
         src_nodata=np.nan,
         dst_nodata=np.nan,
     )

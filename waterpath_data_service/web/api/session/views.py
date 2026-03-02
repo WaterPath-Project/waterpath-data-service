@@ -2,17 +2,19 @@ import os
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
+from waterpath_data_service.settings import settings
 
 router = APIRouter()
+
+_DATA_DIR: Path = settings.data_dir
 
 
 @router.post("/create/")
 async def create_session(session_id: str) -> str:
-    path = "data/" + session_id
-    project_folder = Path(__file__).parent.parent.parent.parent
+    session_dir = _DATA_DIR / session_id
 
-    if not os.path.isdir(project_folder / path):
-        os.makedirs(project_folder / path)
+    if not os.path.isdir(session_dir):
+        os.makedirs(session_dir)
     else:
         raise HTTPException(
             status_code=500,
@@ -23,11 +25,10 @@ async def create_session(session_id: str) -> str:
 
 @router.get("/")
 async def get_session_items(session_id: str) -> list:
-    project_folder = Path(__file__).parent.parent.parent.parent
     try:
-        if os.path.isdir(project_folder / "data" / session_id):
-            session_folder = project_folder / "data" / session_id
-            return [x.name for x in session_folder.glob("**/*")]
+        session_dir = _DATA_DIR / session_id
+        if os.path.isdir(session_dir):
+            return [x.name for x in session_dir.glob("**/*")]
         else:
             raise HTTPException(status_code=404, detail="Session ID not found.")
     except:

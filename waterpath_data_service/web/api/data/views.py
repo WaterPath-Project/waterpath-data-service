@@ -1,6 +1,7 @@
 import json, os, shutil, httpx, pandas as pd, io
 import zipfile
 from pathlib import Path
+from waterpath_data_service.settings import settings
 from waterpath_data_service.services.geodata import geonames, shapefile, resample_raster, geofilter
 from waterpath_data_service.services.prepare_spatial import prepare_spatial_inputs
 from waterpath_data_service.services.projections import (
@@ -15,6 +16,13 @@ from frictionless import Package, Schema, Resource, checks, validate
 
 router = APIRouter()
 
+# Root directory for user data (session packages).  Controlled by
+# WATERPATH_DATA_SERVICE_DATA_DIR; defaults to the bundled data/ folder.
+_DATA_DIR: Path = settings.data_dir
+
+# Static assets (schemas, look-up tables) – always bundled with the container image.
+_STATIC_DIR: Path = Path(__file__).parent.parent.parent.parent / "static"
+
 schemas = ["population", "sanitation", "treatment"]
 
 population_cols = {
@@ -28,10 +36,10 @@ population_cols = {
 }
 
 
-def _get_session_default_dir(project_folder: Path, session_id: str) -> Path:
+def _get_session_default_dir(session_id: str) -> Path:
     """Return the session's baseline directory."""
 
-    return project_folder / "data" / session_id / "baseline"
+    return _DATA_DIR / session_id / "baseline"
 
 
 def ensure_human_emissions_csv(session_id: str) -> Path:
@@ -40,8 +48,7 @@ def ensure_human_emissions_csv(session_id: str) -> Path:
     Returns the path to the written isodata.csv.
     """
 
-    project_folder = Path(__file__).parent.parent.parent.parent
-    default_dir = _get_session_default_dir(project_folder, session_id)
+    default_dir = _get_session_default_dir(session_id)
     if not default_dir.is_dir():
         raise HTTPException(status_code=500, detail="Invalid Session ID provided.")
 
@@ -94,16 +101,15 @@ def ensure_human_emissions_csv(session_id: str) -> Path:
 
 @router.get("/input/download")
 async def download_input_data(session_id: str, file_id: str | None = None):
-    path = "data/" + session_id
-    project_folder = Path(__file__).parent.parent.parent.parent
+    session_dir = _DATA_DIR / session_id
     default_folder = "baseline/"
-    if os.path.isdir(project_folder / path):
+    if os.path.isdir(session_dir):
         if file_id is not None:
             file_path = file_id + ".csv"
-            human_emissions_dir = project_folder / path / default_folder / "human_emissions"
-            if os.path.isfile(project_folder / path / file_path):
+            human_emissions_dir = session_dir / default_folder / "human_emissions"
+            if os.path.isfile(session_dir / file_path):
                 return FileResponse(
-                    path=project_folder / path / file_path,
+                    path=session_dir / file_path,
                     filename="datapackage.json",
                     media_type="text/csv",
                 )
@@ -120,7 +126,7 @@ async def download_input_data(session_id: str, file_id: str | None = None):
                 # Merge pop + sanitation → human_emissions/isodata.csv
                 ensure_human_emissions_csv(session_id)
 
-                default_dir = _get_session_default_dir(project_folder, session_id)
+                default_dir = _get_session_default_dir(session_id)
                 geodata_dir = default_dir / "geodata"
                 human_emissions_dir = default_dir / "human_emissions"
                 treatment_path = human_emissions_dir / "treatment.csv"
@@ -165,16 +171,15 @@ async def download_input_data(session_id: str, file_id: str | None = None):
 
 @router.post("/input/upload")
 async def upload_input_data(session_id: str, file_id: str, file: UploadFile) -> None:
-    path = "data/" + session_id
-    project_folder = Path(__file__).parent.parent.parent.parent
+    session_dir = _DATA_DIR / session_id
     default_folder = "baseline/"
-    if os.path.isdir(project_folder / path):
+    if os.path.isdir(session_dir):
         print(file_id in schemas)
         if file_id is not None and file_id in schemas:
             file_path = file_id + ".csv"
             try:
                 contents = file.file.read()
-                with open(project_folder / path / file_path, "wb") as f:
+                with open(session_dir / file_path, "wb") as f:
                     f.write(contents)
             except HTTPException:
                 raise HTTPException(status_code=500, detail="File was not uploaded.")
@@ -222,8 +227,7 @@ async def generate_projection_data(
             detail=f"Invalid SSP. Allowed: {sorted(allowed_ssp)}",
         )
 
-    project_folder = Path(__file__).parent.parent.parent.parent
-    session_dir = project_folder / "data" / session_id
+    session_dir = _DATA_DIR / session_id
 
     if not session_dir.is_dir():
         raise HTTPException(status_code=500, detail="Invalid Session ID provided.")
@@ -239,7 +243,7 @@ async def generate_projection_data(
     scenario_human_emissions_path = scenario_dir / "isodata.csv"
     shutil.copyfile(baseline_human_emissions_path, scenario_human_emissions_path)
 
-    static_data_dir = project_folder / "static" / "data"
+    static_data_dir = _STATIC_DIR / "data"
 
     if schema_norm == "population":
         out_tif = generate_population_isoraster(
@@ -306,8 +310,7 @@ async def validate_projection_population(
     Also returns aggregate totals for a quick sanity check.
     """
     ssp_norm = ssp.strip().upper()
-    project_folder = Path(__file__).parent.parent.parent.parent
-    session_dir = project_folder / "data" / session_id
+    session_dir = _DATA_DIR / session_id
 
     if not session_dir.is_dir():
         raise HTTPException(status_code=500, detail="Invalid Session ID provided.")
@@ -409,8 +412,7 @@ async def download_projection(
     if ssp_norm not in {f"SSP{i}" for i in range(1, 6)}:
         raise HTTPException(status_code=422, detail="Invalid SSP. Allowed: SSP1..SSP5")
 
-    project_folder = Path(__file__).parent.parent.parent.parent
-    static_data_dir = project_folder / "static" / "data"
+    static_data_dir = _STATIC_DIR / "data"
 
     # Read the uploaded CSV.
     raw = await file.read()
@@ -533,29 +535,30 @@ async def download_projection(
 
 @router.post("/input/generate")
 async def generate_input_data_package(session_id: str, gids: str):
-    areas = [x.strip(" ") for x in gids.split(",")]
+    areas = [x.strip() for x in gids.split(",") if x.strip()]
 
-    path = "data/" + session_id
-    templates_path = "static/"
-    project_folder = Path(__file__).parent.parent.parent.parent
+    session_dir = _DATA_DIR / session_id
 
-    if os.path.isdir(project_folder / path):
+    if os.path.isdir(session_dir):
         default_path = "baseline/"
         schemas_path = "schemas/"
         # Note: schemas are stored in the session folder so the generated
         # datapackage is self-contained and can be validated later.
 
-        human_emissions_output_path = project_folder / path / default_path / "human_emissions"
-        if not os.path.isdir(project_folder / path / default_path):
-            os.makedirs(project_folder / path / default_path)
+        human_emissions_output_path = session_dir / default_path / "human_emissions"
+        if not os.path.isdir(session_dir / default_path):
+            os.makedirs(session_dir / default_path)
         os.makedirs(human_emissions_output_path, exist_ok=True)
         try:
             resources = []
-            data = await generateData(areas, project_folder / path / default_path)
+            data = await generateData(areas, session_dir / default_path)
 
             # Country-level requests use the compact 3-fraction treatment schema;
-            # sub-area requests use the high-resolution WWTP point schema.
+            # sub-area requests use the high-resolution WWTP point schema, unless
+            # no WWTPs were found (in which case generateData falls back to fractions
+            # and sets _treatment_used_fractions).
             is_country_level = len(areas[0]) == 3
+            treatment_use_fractions = is_country_level or bool(data.get("_treatment_used_fractions"))
 
             for schema in schemas:
                 if schema in data:
@@ -568,21 +571,22 @@ async def generate_input_data_package(session_id: str, gids: str):
                         f.write(data[schema])
 
                     # Select the correct schema JSON for treatment depending on
-                    # whether this is a country-level or sub-area request.
+                    # whether this is a country-level or sub-area request (or
+                    # whether the sub-area fell back to fractions due to 0 WWTPs).
                     if schema == "treatment":
-                        src_schema_name = "treatment.json" if is_country_level else "treatment_high_resolution.json"
+                        src_schema_name = "treatment.json" if treatment_use_fractions else "treatment_high_resolution.json"
                     else:
                         src_schema_name = schema + ".json"
                     dst_schema_name = schema + ".json"  # always written as treatment.json
 
-                    if not os.path.isdir(project_folder / path / schemas_path):
-                        os.mkdir(project_folder / path / schemas_path)
+                    if not os.path.isdir(session_dir / schemas_path):
+                        os.mkdir(session_dir / schemas_path)
                     if not os.path.isfile(
-                        project_folder / path / schemas_path / dst_schema_name
+                        session_dir / schemas_path / dst_schema_name
                     ):
                         shutil.copyfile(
-                            project_folder / templates_path / schemas_path / src_schema_name,
-                            project_folder / path / schemas_path / dst_schema_name,
+                            _STATIC_DIR / schemas_path / src_schema_name,
+                            session_dir / schemas_path / dst_schema_name,
                         )
 
                     # Frictionless resources should use paths relative to the package
@@ -592,13 +596,13 @@ async def generate_input_data_package(session_id: str, gids: str):
                     resources.append(resource)
 
             package = Package(resources=resources)
-            package.to_json(str(project_folder / path / "datapackage.json"))
+            package.to_json(str(session_dir / "datapackage.json"))
 
             # Generate baseline spatial rasters from the population CSV + shapefile.
             # Uses the 2025 SSP3 1 km raster as the baseline population surface.
-            geodata_shp = project_folder / path / default_path / "geodata" / "geodata.shp"
+            geodata_shp = session_dir / default_path / "geodata" / "geodata.shp"
             isodata_csv = human_emissions_output_path / "population.csv"
-            pop_raster = project_folder / "static" / "data" / "global_pop_2025_CN_1km_R2025A_UA_v1.tif"
+            pop_raster = _STATIC_DIR / "data" / "global_pop_2025_CN_1km_R2025A_UA_v1.tif"
 
             if geodata_shp.is_file() and isodata_csv.is_file() and pop_raster.is_file():
                 try:
@@ -627,7 +631,7 @@ async def generate_input_data_package(session_id: str, gids: str):
             )
     else:
         raise HTTPException(status_code=500, detail="Invalid Session ID provided.")
-    with open(str(project_folder / path / "datapackage.json")) as f:
+    with open(str(session_dir / "datapackage.json")) as f:
         d = json.load(f)
         return d
 
@@ -635,33 +639,31 @@ async def generate_input_data_package(session_id: str, gids: str):
 @router.get("/input/validate")
 async def validate_input_data_package(session_id: str, file_id: str) -> list:
 
-    path = "data/" + session_id
-    templates_path = "static/"
+    session_dir = _DATA_DIR / session_id
     schemas_path = "schemas/"
-    project_folder = Path(__file__).parent.parent.parent.parent
 
-    if not os.path.isdir(project_folder / path / schemas_path):
+    if not os.path.isdir(session_dir / schemas_path):
         shutil.copytree(
-            project_folder / templates_path / schemas_path,
-            project_folder / path / schemas_path,
+            _STATIC_DIR / schemas_path,
+            session_dir / schemas_path,
         )
 
     if file_id not in schemas:
         raise HTTPException(status_code=500, detail="Invalid File ID provided.")
     
-    if os.path.isdir(project_folder / path):
-        package_path = str(project_folder / path / 'datapackage.json')
+    if os.path.isdir(session_dir):
+        package_path = str(session_dir / 'datapackage.json')
         package = Package(source=package_path)
         resource = package.get_resource(file_id)
         resource_schema = resource.name + ".json"
 
         # resource.schema = Schema(schema_path)
         schema_path = str(
-            Path(project_folder / path / schemas_path / resource_schema).relative_to(
-                project_folder / path,
+            Path(session_dir / schemas_path / resource_schema).relative_to(
+                session_dir,
             ),
         )
-        resource.schema = Schema.from_descriptor(project_folder / path / schemas_path / resource_schema)
+        resource.schema = Schema.from_descriptor(session_dir / schemas_path / resource_schema)
 
         if resource.name == "sanitation":
             report = validate(
@@ -711,8 +713,6 @@ async def generateData(gids, path):
     """
     resObj = dict()
     schemas_path = "schemas/"
-    templates_path = "static/"
-    project_folder = Path(__file__).parent.parent.parent.parent
 
     # Side effect: writes/ensures session geodata exists.
     shapefile(gids, path)
@@ -730,7 +730,7 @@ async def generateData(gids, path):
 
             # The schema JSON is used to enforce column ordering and naming.
             schema_descriptor_path = (
-                project_folder / templates_path / schemas_path / schema_name
+                _STATIC_DIR / schemas_path / schema_name
             )
 
             if schema == "population":
@@ -766,10 +766,12 @@ async def generateData(gids, path):
                     # For historical reasons, iso_country is the same alpha3 used in gid.
                     output["iso_country"] = output["gid"]
 
-                    # Requested behavior: fill `iso` with the same identifier as `gid`.
-                    # (Some legacy datasets use numeric ISO codes here; this forces a
-                    # consistent string identifier for generated packages.)
-                    output["iso"] = output["gid"]
+                    # iso = sequential integer zone index (1-based, in gids list order).
+                    # This integer is burned into isoraster.tif as the pixel value so
+                    # that downstream code can join the raster back to isodata.csv rows
+                    # via the iso column.  gid stays as the string identifier.
+                    gid_order = {g: i + 1 for i, g in enumerate(gids)}
+                    output["iso"] = output["gid"].map(gid_order)
                     population_output = output
                     resObj[schema] = output.to_csv(index=False, lineterminator="\n")
 
@@ -856,8 +858,11 @@ async def generateData(gids, path):
                             .reindex(columns=fields)
                         )
 
-                        # Requested behavior: fill `iso` with the same identifier as `gid`.
-                        output["iso"] = output["gid"]
+                        # iso = sequential integer zone index (1-based, in gids list order)
+                        # matched to the integer pixel values burned into isoraster.tif.
+                        # gid remains the string GID identifier.
+                        gid_order = {g: i + 1 for i, g in enumerate(gids)}
+                        output["iso"] = output["gid"].map(gid_order)
                         population_output = output
                         resObj[schema] = output.to_csv(
                             index=False, lineterminator="\n"
@@ -919,7 +924,7 @@ async def generateData(gids, path):
                     # Country-level request: look up aggregate treatment fractions
                     # from the static lookup table (Van Drecht et al. 2009 / OECD 2016,
                     # penultimate column = 2010 values, format P-S-T /100).
-                    fractions_path = project_folder / "static" / "data" / "treatment_fractions.csv"
+                    fractions_path = _STATIC_DIR / "data" / "treatment_fractions.csv"
                     fractions_df = pd.read_csv(fractions_path)
                     output = fractions_df[fractions_df["alpha3"].isin(alpha3_gids)].copy()
                     # Align with schema: rename alpha3 -> gid
@@ -939,8 +944,31 @@ async def generateData(gids, path):
                             geofiltered_areas["treatment_type"].str.lower() != "ponds"
                         ].copy()
                         geofiltered_areas["treatment_type"] = geofiltered_areas["treatment_type"].str.capitalize()
-                    resObj[schema] = geofiltered_areas.to_csv(
-                        index=False, lineterminator="\n"
-                    )
+
+                    if geofiltered_areas.empty:
+                        # No WWTPs found in the study area – fall back to the
+                        # country-level fraction schema so the package is still
+                        # usable.  Use the parent-country fractions, expanded
+                        # once per sub-area GID.
+                        fractions_path = _STATIC_DIR / "data" / "treatment_fractions.csv"
+                        fractions_df = pd.read_csv(fractions_path)
+                        country_fracs = fractions_df[fractions_df["alpha3"].isin(alpha3_gids)]
+                        # Replicate country fractions for every requested GID so
+                        # each sub-area row carries its parent country's fractions.
+                        if population_output is not None and not population_output.empty:
+                            frac_rows = (
+                                population_output[["gid", "iso_country"]]
+                                .merge(country_fracs, left_on="iso_country", right_on="alpha3", how="left")
+                                .drop(columns=["iso_country", "alpha3"], errors="ignore")
+                            )
+                        else:
+                            # Fallback: one row per unique alpha3 with gid = alpha3
+                            frac_rows = country_fracs.rename(columns={"alpha3": "gid"})
+                        resObj[schema] = frac_rows.to_csv(index=False, lineterminator="\n")
+                        resObj["_treatment_used_fractions"] = True
+                    else:
+                        resObj[schema] = geofiltered_areas.to_csv(
+                            index=False, lineterminator="\n"
+                        )
 
     return resObj

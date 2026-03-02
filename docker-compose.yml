@@ -21,6 +21,8 @@ services:
       WATERPATH_DATA_SERVICE_HOST: 0.0.0.0
     ports:
       - "127.0.0.1:8000:8000"
+    volumes:
+      - ./waterpath_data_service/data:/app/src/waterpath_data_service/data
 
 
 

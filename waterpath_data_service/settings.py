@@ -39,6 +39,10 @@ class Settings(BaseSettings):
 
     log_level: LogLevel = LogLevel.INFO
 
+    # Directory where session data packages are stored.  Mount this path as a
+    # volume in Docker so that generated files are written to the host.
+    data_dir: Path = Path(__file__).parent / "data"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_prefix="WATERPATH_DATA_SERVICE_",

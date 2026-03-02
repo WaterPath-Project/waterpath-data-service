@@ -263,16 +263,15 @@ def update_human_emissions_population(
 
     Uses isoraster.tif as a zone mask: for each zone ID, sums all pixels across
     pop_urban.tif and pop_rural.tif that share that zone ID.  The zone-ID-to-GID
-    mapping is derived from the shapefile feature order (feature i → zone ID i+1).
+    mapping is derived from isodata.csv row order (zone ID == 1-based row index).
 
     Args:
         human_emissions_path: Path to the isodata.csv file to update.
         isoraster_path:        Path to isoraster.tif (integer zone-index raster).
         scenario_dir:          Directory containing pop_urban.tif and pop_rural.tif.
-        shapefile_path:        Path to the session geodata shapefile.
+        shapefile_path:        Path to the session geodata shapefile (unused, kept for
+                               API compatibility).
     """
-    import geopandas as gpd
-
     pop_urban_path = scenario_dir / "pop_urban.tif"
     pop_rural_path = scenario_dir / "pop_rural.tif"
     if not pop_urban_path.is_file() or not pop_rural_path.is_file():
@@ -282,19 +281,25 @@ def update_human_emissions_population(
         )
 
     # ------------------------------------------------------------------
-    # Build zone_id → GID mapping from shapefile feature order.
-    # prepare_spatial_inputs assigns iso_ids = [1, 2, …, n] in feature order.
+    # Build zone_id → GID mapping.
+    # isodata.csv stores the integer raster zone index in the ``iso`` column
+    # and the string area identifier in the ``gid`` column.  Map pixel value
+    # directly to gid string so zonal sums can be written back to the CSV.
     # ------------------------------------------------------------------
-    gdf = gpd.read_file(shapefile_path)
-    gid_candidates = ["GID_3", "GID_2", "GID_1", "GID_0", "gid", "alpha3"]
-    gid_col = next((c for c in gid_candidates if c in gdf.columns), None)
+    df_pre = pd.read_csv(human_emissions_path)
+    if "iso" not in df_pre.columns:
+        raise ValueError("isodata.csv missing required 'iso' column (integer zone index).")
+    gid_col = "gid" if "gid" in df_pre.columns else next(
+        (c for c in ["alpha3", "iso_country", "iso3"] if c in df_pre.columns), None
+    )
     if gid_col is None:
-        raise ValueError(f"No GID column found in shapefile. Available: {list(gdf.columns)}")
-    # Use enumerate so zone_id is always 1,2,...,n regardless of DataFrame index.
-    zone_to_gid: dict[int, str] = {
-        zone_id: str(row[gid_col]).strip()
-        for zone_id, (_, row) in enumerate(gdf.iterrows(), start=1)
-    }
+        raise ValueError("isodata.csv missing a string identifier column (gid/alpha3/iso_country/iso3).")
+    zone_to_gid: dict[int, str] = {}
+    for _, row in df_pre.iterrows():
+        try:
+            zone_to_gid[int(row["iso"])] = str(row[gid_col]).strip()
+        except (ValueError, TypeError):
+            pass
 
     # ------------------------------------------------------------------
     # Read rasters and compute zonal sums.

@@ -5,8 +5,11 @@ from pydantic import BaseModel
 import pygadm
 from fastapi import APIRouter, HTTPException
 import matplotlib.pyplot as plt
+from waterpath_data_service.settings import settings
 
 router = APIRouter()
+
+_DATA_DIR: Path = settings.data_dir
 
 
 @router.post("/geometries")
@@ -19,7 +22,7 @@ async def polygons(admin: str, level: int) -> JSONResponse:
     # else:
     #     raise HTTPException(status_code=404, detail="Session ID not found.")
 
-    areas = [x.strip(" ") for x in admin.split(",")]
+    areas = [x.strip() for x in admin.split(",") if x.strip()]
 
     gdf = pygadm.Items(admin=list(areas), content_level=level)
     geometries = gdf.to_geo_dict()
@@ -28,7 +31,7 @@ async def polygons(admin: str, level: int) -> JSONResponse:
 @router.post("/names")
 def geonames(admin: str) -> JSONResponse:
 
-    areas = [x.strip(" ") for x in admin.split(",")]
+    areas = [x.strip() for x in admin.split(",") if x.strip()]
     names = []
     for area in areas:
         level = area.count('.')
@@ -48,12 +51,11 @@ def geonames(admin: str) -> JSONResponse:
 
 @router.post("/preview")
 def preview(session_id: str) -> PlainTextResponse:
-    project_folder = Path(__file__).parent.parent.parent.parent
+    session_dir = _DATA_DIR / session_id
     encoded_string = ""
-    if os.path.isdir(project_folder / "data" / session_id):
-        session_folder = project_folder / "data" / session_id
-        if os.path.isfile(project_folder / "data" / session_id / "default" / "population.csv"):
-            df = pd.read_csv(project_folder / "data" / session_id / "default" / "population.csv")
+    if os.path.isdir(session_dir):
+        if os.path.isfile(session_dir / "default" / "population.csv"):
+            df = pd.read_csv(session_dir / "default" / "population.csv")
             areas = df['gid'].tolist()
             gdf = pygadm.Items(admin=list(areas), content_level=areas[0].count('.'))
             ax = gdf.plot(color='#8DD0A4', edgecolor='#0B4159')
