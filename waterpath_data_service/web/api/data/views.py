@@ -1,4 +1,4 @@
-import json, os, shutil, httpx, pandas as pd, io
+import json, logging, os, shutil, httpx, pandas as pd, io
 import zipfile
 from pathlib import Path
 from waterpath_data_service.settings import settings
@@ -8,6 +8,9 @@ from waterpath_data_service.services.projections import (
     generate_baseline_csv_projection,
     generate_population_isoraster,
     update_human_emissions_population,
+    update_isodata_projected_variables,
+    fetch_treatment_fractions_csv,
+    fetch_assumptions,
 )
 from fastapi import APIRouter, HTTPException, UploadFile, File, Query
 from fastapi.responses import FileResponse, StreamingResponse
@@ -15,6 +18,7 @@ from pydantic import BaseModel
 from frictionless import Package, Schema, Resource, checks, validate
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 # Root directory for user data (session packages).  Controlled by
 # WATERPATH_DATA_SERVICE_DATA_DIR; defaults to the bundled data/ folder.
@@ -245,6 +249,17 @@ async def generate_projection_data(
 
     static_data_dir = _STATIC_DIR / "data"
 
+    # Detect admin level from baseline isodata to drive projection logic.
+    _baseline_pop_csv = session_dir / "baseline" / "human_emissions" / "population.csv"
+    _is_country_level: bool = True
+    if _baseline_pop_csv.is_file():
+        try:
+            _bl_df = pd.read_csv(_baseline_pop_csv)
+            _gid_vals = _bl_df.get("gid", _bl_df.get("alpha3", pd.Series(dtype=str)))
+            _is_country_level = bool((_gid_vals.astype(str).str.len() <= 3).all())
+        except Exception:
+            pass
+
     if schema_norm == "population":
         out_tif = generate_population_isoraster(
             session_dir=session_dir,
@@ -253,19 +268,27 @@ async def generate_projection_data(
             ssp=ssp_norm,
             year=year,
         )
-        
+
         # Update human_emissions.csv with population values calculated from isoraster.tif
         shapefile_path = session_dir / "baseline" / "geodata" / "geodata.shp"
         if not shapefile_path.is_file():
             shapefile_path = session_dir / "geodata" / "geodata.shp"
-        
+
         update_human_emissions_population(
             human_emissions_path=scenario_human_emissions_path,
             isoraster_path=out_tif,
             scenario_dir=scenario_dir,
             shapefile_path=shapefile_path,
         )
-        
+
+        # Update fraction_urban_pop, fraction_pop_under5, and hdi
+        assumptions = await update_isodata_projected_variables(
+            isodata_path=scenario_human_emissions_path,
+            ssp=ssp_norm,
+            year=year,
+            is_country_level=_is_country_level,
+        )
+
         return {
             "session_id": session_id,
             "schema": schema_norm,
@@ -274,9 +297,39 @@ async def generate_projection_data(
             "scenario_isodata_csv": str(scenario_human_emissions_path),
             "isoraster_tif": str(out_tif),
             "status": "written",
+            "assumptions": assumptions,
         }
 
-    # Placeholder behavior for sanitation/treatment: copy baseline CSV into the scenario folder.
+    if schema_norm == "treatment":
+        # Fetch treatment fractions for the session areas from GitHub.
+        try:
+            _iso_df = pd.read_csv(scenario_human_emissions_path)
+            _gid_col = next((c for c in ["gid", "alpha3", "iso_country"] if c in _iso_df.columns), None)
+            if _gid_col is None:
+                raise ValueError("No GID column found in isodata.csv.")
+            _alpha3_list = _iso_df[_gid_col].astype(str).str[:3].unique().tolist()
+            treatment_df = await fetch_treatment_fractions_csv(_alpha3_list)
+            # Rename alpha3 -> gid to match schema convention.
+            treatment_df = treatment_df.rename(columns={"alpha3": "gid"})
+            out_csv = scenario_dir / "treatment.csv"
+            treatment_df.to_csv(out_csv, index=False)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to generate treatment projection: {exc}")
+
+        assumptions = await fetch_assumptions(["treatment_fractions"])
+
+        return {
+            "session_id": session_id,
+            "schema": schema_norm,
+            "year": year,
+            "ssp": ssp_norm,
+            "scenario_isodata_csv": str(scenario_human_emissions_path),
+            "projected_csv": str(out_csv),
+            "status": "written",
+            "assumptions": assumptions,
+        }
+
+    # Sanitation: copy baseline CSV into the scenario folder.
     try:
         out_csv = generate_baseline_csv_projection(
             session_dir=session_dir,
@@ -449,11 +502,14 @@ async def download_projection(
         shutil.copyfile(baseline_csv_path, projected_csv_path)
 
         summary: dict = {}
+        assumptions: list = []
+
+        # Detect admin level: 3-char gids are country codes; longer gids are sub-national.
+        is_country_level = all(len(str(g)) <= 3 for g in gids_list)
 
         if schema_norm == "population":
             from waterpath_data_service.services.projections import (
                 _population_tif_path,
-                update_human_emissions_population,
             )
             try:
                 tif_path = _population_tif_path(static_data_dir, ssp_norm, year)
@@ -482,34 +538,66 @@ async def download_projection(
             except Exception as exc:
                 raise HTTPException(status_code=500, detail=f"Population update failed: {exc}")
 
-        # Compute per-area and aggregate statistics.
-        projected_df = pd.read_csv(projected_csv_path)
-        merged_stats = pd.merge(
-            baseline_df[[gid_col, "population"]],
-            projected_df[[gid_col, "population"]],
-            on=gid_col,
-            suffixes=("_baseline", "_projected"),
-        )
-        merged_stats["diff"] = merged_stats["population_projected"] - merged_stats["population_baseline"]
-        merged_stats["pct_change"] = (
-            (merged_stats["diff"] / merged_stats["population_baseline"].replace(0, float("nan"))) * 100
-        ).round(2)
+            # Update fraction_urban_pop, fraction_pop_under5, and hdi.
+            try:
+                assumptions = await update_isodata_projected_variables(
+                    isodata_path=projected_csv_path,
+                    ssp=ssp_norm,
+                    year=year,
+                    is_country_level=is_country_level,
+                )
+            except Exception as exc:
+                logger.warning("update_isodata_projected_variables failed: %s", exc)
 
-        area_rows = merged_stats.rename(columns={gid_col: "gid"}).to_dict(orient="records")
-        total_baseline = int(merged_stats["population_baseline"].sum())
-        total_projected = int(merged_stats["population_projected"].sum())
-        total_diff = total_projected - total_baseline
-        summary = {
-            "schema": schema_norm,
-            "ssp": ssp_norm,
-            "year": year,
-            "total_baseline_population": total_baseline,
-            "total_projected_population": total_projected,
-            "total_diff": total_diff,
-            "total_pct_change": round((total_diff / total_baseline * 100) if total_baseline else 0, 2),
-            "n_areas": len(area_rows),
-            "areas": area_rows,
-        }
+        elif schema_norm == "treatment":
+            # Fetch treatment fractions for the uploaded areas from GitHub.
+            alpha3_list = [str(g)[:3] for g in gids_list]
+            try:
+                treatment_df = await fetch_treatment_fractions_csv(alpha3_list)
+                treatment_df = treatment_df.rename(columns={"alpha3": "gid"})
+                treatment_df.to_csv(projected_csv_path, index=False)
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail=f"Failed to fetch treatment fractions: {exc}")
+            assumptions = await fetch_assumptions(["treatment_fractions"])
+
+        # Compute per-area and aggregate statistics (population schema only).
+        projected_df = pd.read_csv(projected_csv_path)
+        if schema_norm == "population" and "population" in projected_df.columns and "population" in baseline_df.columns:
+            merged_stats = pd.merge(
+                baseline_df[[gid_col, "population"]],
+                projected_df[[gid_col, "population"]],
+                on=gid_col,
+                suffixes=("_baseline", "_projected"),
+            )
+            merged_stats["diff"] = merged_stats["population_projected"] - merged_stats["population_baseline"]
+            merged_stats["pct_change"] = (
+                (merged_stats["diff"] / merged_stats["population_baseline"].replace(0, float("nan"))) * 100
+            ).round(2)
+
+            area_rows = merged_stats.rename(columns={gid_col: "gid"}).to_dict(orient="records")
+            total_baseline = int(merged_stats["population_baseline"].sum())
+            total_projected = int(merged_stats["population_projected"].sum())
+            total_diff = total_projected - total_baseline
+            summary = {
+                "schema": schema_norm,
+                "ssp": ssp_norm,
+                "year": year,
+                "total_baseline_population": total_baseline,
+                "total_projected_population": total_projected,
+                "total_diff": total_diff,
+                "total_pct_change": round((total_diff / total_baseline * 100) if total_baseline else 0, 2),
+                "n_areas": len(area_rows),
+                "areas": area_rows,
+                "assumptions": assumptions,
+            }
+        else:
+            summary = {
+                "schema": schema_norm,
+                "ssp": ssp_norm,
+                "year": year,
+                "n_areas": len(projected_df),
+                "assumptions": assumptions,
+            }
 
         # Build the zip entirely in memory.
         zip_buffer = io.BytesIO()
@@ -598,6 +686,32 @@ async def generate_input_data_package(session_id: str, gids: str):
             package = Package(resources=resources)
             package.to_json(str(session_dir / "datapackage.json"))
 
+            # Fetch assumptions and write a summary.json alongside the datapackage.
+            try:
+                dataset_keys_for_assumptions = ["urbanization", "population", "hdi"]
+                if is_country_level or data.get("_treatment_used_fractions"):
+                    dataset_keys_for_assumptions.append("treatment_fractions")
+                assumptions = await fetch_assumptions(dataset_keys_for_assumptions)
+                # For country-level (admin 0) analysis, exclude assumptions that are
+                # only relevant for sub-national (admin_level > 0) analyses.
+                if is_country_level:
+                    assumptions = [
+                        a for a in assumptions
+                        if a.get("admin_level", "all") in ("national", "all", "")
+                    ]
+                summary_data = {
+                    "session_id": session_id,
+                    "assumptions": assumptions,
+                }
+                with open(str(session_dir / "summary.json"), "w", encoding="utf-8") as sf:
+                    json.dump(summary_data, sf, indent=2)
+            except Exception as assumption_err:
+                logger.warning(
+                    "Could not write summary.json for session %s: %s",
+                    session_id,
+                    assumption_err,
+                )
+
             # Generate baseline spatial rasters from the population CSV + shapefile.
             # Uses the 2025 SSP3 1 km raster as the baseline population surface.
             geodata_shp = session_dir / default_path / "geodata" / "geodata.shp"
@@ -614,17 +728,14 @@ async def generate_input_data_package(session_id: str, gids: str):
                     )
                 except Exception as spatial_err:
                     # Non-fatal: CSV generation already succeeded; log and continue.
-                    import logging
-                    logging.getLogger(__name__).warning(
-                        "prepare_spatial_inputs failed for session %s: %s", path, spatial_err
+                    logger.warning(
+                        "prepare_spatial_inputs failed for session %s: %s", session_id, spatial_err
                     )
 
         except Exception as e:
-            import traceback, logging
+            import traceback
             tb = traceback.format_exc()
-            logging.getLogger(__name__).error(
-                "generate_input_data_package failed:\n%s", tb
-            )
+            logger.error("generate_input_data_package failed:\n%s", tb)
             raise HTTPException(
                 status_code=500,
                 detail=f"Failed to generate input data template files: {e}\n{tb}",
@@ -921,14 +1032,11 @@ async def generateData(gids, path):
                 alpha3_gids = [s[0:3] for s in gids]
 
                 if len(gids[0]) == 3:
-                    # Country-level request: look up aggregate treatment fractions
-                    # from the static lookup table (Van Drecht et al. 2009 / OECD 2016,
-                    # penultimate column = 2010 values, format P-S-T /100).
-                    fractions_path = _STATIC_DIR / "data" / "treatment_fractions.csv"
-                    fractions_df = pd.read_csv(fractions_path)
-                    output = fractions_df[fractions_df["alpha3"].isin(alpha3_gids)].copy()
+                    # Country-level request: fetch treatment fractions from the
+                    # WaterPath GitHub repository.
+                    fractions_df = await fetch_treatment_fractions_csv(alpha3_gids)
                     # Align with schema: rename alpha3 -> gid
-                    output = output.rename(columns={"alpha3": "gid"})
+                    output = fractions_df.rename(columns={"alpha3": "gid"})
                     resObj[schema] = output.to_csv(index=False, lineterminator="\n")
                 else:
                     # Sub-area request: spatially filter high-resolution WWTP point data.
@@ -947,12 +1055,10 @@ async def generateData(gids, path):
 
                     if geofiltered_areas.empty:
                         # No WWTPs found in the study area – fall back to the
-                        # country-level fraction schema so the package is still
-                        # usable.  Use the parent-country fractions, expanded
-                        # once per sub-area GID.
-                        fractions_path = _STATIC_DIR / "data" / "treatment_fractions.csv"
-                        fractions_df = pd.read_csv(fractions_path)
-                        country_fracs = fractions_df[fractions_df["alpha3"].isin(alpha3_gids)]
+                        # country-level fraction schema (fetched from GitHub) so
+                        # the package is still usable.  Use the parent-country
+                        # fractions, expanded once per sub-area GID.
+                        country_fracs = await fetch_treatment_fractions_csv(alpha3_gids)
                         # Replicate country fractions for every requested GID so
                         # each sub-area row carries its parent country's fractions.
                         if population_output is not None and not population_output.empty:

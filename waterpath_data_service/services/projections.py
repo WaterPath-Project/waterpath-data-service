@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import io
 import logging
 import shutil
 from pathlib import Path
 
 import geopandas as gpd
+import httpx
 import numpy as np
 import pandas as pd
 import rasterio
@@ -13,6 +15,279 @@ from shapely.geometry import box
 from waterpath_data_service.services.prepare_spatial import prepare_spatial_inputs
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Remote dataset URLs
+# ---------------------------------------------------------------------------
+_URBANIZATION_LEVEL0_FUTURE_URL = (
+    "https://raw.githubusercontent.com/WaterPath-Project/waterpath-data"
+    "/refs/heads/main/world_admin_units_urbanisation_degree/data/world_urbanisation_level0_future.csv"
+)
+_POPULATION_FUTURE_URL = (
+    "https://raw.githubusercontent.com/WaterPath-Project/waterpath-data"
+    "/refs/heads/main/world_population/data/world-population-future.csv"
+)
+_HDI_FUTURE_URL = (
+    "https://raw.githubusercontent.com/WaterPath-Project/waterpath-data"
+    "/refs/heads/main/hdi/data/hdi_future.csv"
+)
+TREATMENT_FRACTIONS_URL = (
+    "https://raw.githubusercontent.com/WaterPath-Project/waterpath-data"
+    "/refs/heads/main/treatment_fractions/data/treatment.csv"
+)
+
+_ASSUMPTIONS_URLS: dict[str, str] = {
+    "urbanization": (
+        "https://raw.githubusercontent.com/WaterPath-Project/waterpath-data"
+        "/refs/heads/main/world_admin_units_urbanisation_degree/data/assumptions.csv"
+    ),
+    "population": (
+        "https://raw.githubusercontent.com/WaterPath-Project/waterpath-data"
+        "/refs/heads/main/world_population/data/assumptions.csv"
+    ),
+    "hdi": (
+        "https://raw.githubusercontent.com/WaterPath-Project/waterpath-data"
+        "/refs/heads/main/hdi/data/assumptions.csv"
+    ),
+    "treatment_fractions": (
+        "https://raw.githubusercontent.com/WaterPath-Project/waterpath-data"
+        "/refs/heads/main/treatment_fractions/data/assumptions.csv"
+    ),
+}
+
+
+
+# ---------------------------------------------------------------------------
+# Remote data helpers
+# ---------------------------------------------------------------------------
+
+async def fetch_treatment_fractions_csv(alpha3_list: list[str]) -> pd.DataFrame:
+    """Fetch the country-level treatment fractions dataset from GitHub.
+
+    Columns: ``alpha3``, ``FractionPrimarytreatment``,
+    ``FractionSecondarytreatment``, ``FractionTertiarytreatment``.
+
+    The returned DataFrame is filtered to the requested *alpha3_list*.
+    """
+    async with httpx.AsyncClient() as client:
+        r = await client.get(TREATMENT_FRACTIONS_URL, timeout=30)
+        r.raise_for_status()
+    df = pd.read_csv(io.StringIO(r.text))
+    return df[df["alpha3"].isin(alpha3_list)].copy()
+
+
+async def fetch_urbanization_level0_projection(
+    alpha3_list: list[str],
+    ssp: str,
+    year: int,
+) -> dict[str, float]:
+    """Return ``{alpha3: fraction_urban}`` for the given SSP/year.
+
+    Source: ``world_urbanisation_level0_future.csv``
+    Long-format CSV with columns (possibly no header): alpha3, scenario, year, fractionUrban.
+    For sub-national analyses, urbanization is kept as-is (baseline); only call this for
+    country-level (admin level 0) requests.
+    """
+    async with httpx.AsyncClient() as client:
+        r = await client.get(_URBANIZATION_LEVEL0_FUTURE_URL, timeout=30)
+        r.raise_for_status()
+    # Detect whether the CSV has a header row.
+    first_line = r.text.lstrip().split("\n")[0]
+    has_header = first_line.lower().startswith("alpha3")
+    if has_header:
+        df = pd.read_csv(io.StringIO(r.text))
+        # Normalise column names to lowercase
+        df.columns = [c.lower() for c in df.columns]
+        fraction_col = next((c for c in df.columns if "urban" in c), df.columns[-1])
+        scenario_col = next((c for c in df.columns if "scenario" in c or "ssp" in c), "scenario")
+    else:
+        df = pd.read_csv(
+            io.StringIO(r.text),
+            header=None,
+            names=["alpha3", "scenario", "year", "fractionUrban"],
+        )
+        fraction_col = "fractionUrban"
+        scenario_col = "scenario"
+    df["year"] = pd.to_numeric(df["year"], errors="coerce")
+    ssp_norm = ssp.strip().upper()
+    mask = (
+        df["alpha3"].isin(alpha3_list)
+        & (df[scenario_col].astype(str).str.strip().str.upper() == ssp_norm)
+        & (df["year"] == year)
+    )
+    sub = df[mask]
+    return dict(zip(sub["alpha3"].astype(str), pd.to_numeric(sub[fraction_col], errors="coerce")))
+
+
+async def fetch_fraction_under_five_projection(
+    alpha3_list: list[str],
+    year: int,
+) -> dict[str, float]:
+    """Return ``{alpha3: fraction_pop_under5}`` for the given year.
+
+    Source: ``world-population-future.csv`` (SSP-independent, single projection trajectory).
+    Columns: name, alpha3, totalPopulation, fractionUrban, year, fractionUnderFive.
+    Only the *fractionUnderFive* column is used here.
+    """
+    async with httpx.AsyncClient() as client:
+        r = await client.get(_POPULATION_FUTURE_URL, timeout=30)
+        r.raise_for_status()
+    df = pd.read_csv(io.StringIO(r.text))
+    df["year"] = pd.to_numeric(df["year"], errors="coerce")
+    mask = df["alpha3"].isin(alpha3_list) & (df["year"] == year)
+    sub = df[mask]
+    # Drop duplicates (there should be only one row per alpha3+year here)
+    sub = sub.drop_duplicates(subset=["alpha3"])
+    return dict(zip(sub["alpha3"].astype(str), pd.to_numeric(sub["fractionUnderFive"], errors="coerce")))
+
+
+async def fetch_hdi_projection(
+    alpha3_list: list[str],
+    ssp: str,
+    year: int,
+) -> dict[str, float]:
+    """Return ``{alpha3: hdi}`` for the given SSP/year.
+
+    Source: ``hdi_future.csv`` – wide format:
+    ``alpha3, scenario, 2025, 2030, 2050, 2100``.
+    Country-level values are used for both national and sub-national analyses.
+    """
+    async with httpx.AsyncClient() as client:
+        r = await client.get(_HDI_FUTURE_URL, timeout=30)
+        r.raise_for_status()
+    df = pd.read_csv(io.StringIO(r.text))
+    year_col = str(year)
+    if year_col not in df.columns:
+        logger.warning("Year column '%s' not found in hdi_future.csv; available: %s", year_col, df.columns.tolist())
+        return {}
+    ssp_norm = ssp.strip().upper()
+    scenario_col = next((c for c in df.columns if c.lower() in ("scenario", "ssp")), "scenario")
+    mask = (
+        df["alpha3"].isin(alpha3_list)
+        & (df[scenario_col].astype(str).str.strip().str.upper() == ssp_norm)
+    )
+    sub = df[mask].drop_duplicates(subset=["alpha3"])
+    return dict(zip(sub["alpha3"].astype(str), pd.to_numeric(sub[year_col], errors="coerce")))
+
+
+async def fetch_assumptions(dataset_keys: list[str]) -> list[dict]:
+    """Fetch and merge assumption records from the requested dataset keys.
+
+    Each assumptions.csv is semicolon-delimited with columns:
+    ``id, scenario, year, admin_level, pathogen, assumption``
+
+    Returns a de-duplicated list of assumption dicts.
+    """
+    seen_ids: set[str] = set()
+    results: list[dict] = []
+    async with httpx.AsyncClient() as client:
+        for key in dataset_keys:
+            url = _ASSUMPTIONS_URLS.get(key)
+            if url is None:
+                continue
+            try:
+                r = await client.get(url, timeout=30)
+                r.raise_for_status()
+                df = pd.read_csv(io.StringIO(r.text), sep=";")
+                for _, row in df.iterrows():
+                    row_id = str(row.get("id", "")).strip()
+                    if row_id and row_id not in seen_ids:
+                        seen_ids.add(row_id)
+                        results.append({
+                            "id": row_id,
+                            "scenario": str(row.get("scenario", "")).strip(),
+                            "year": str(row.get("year", "")).strip(),
+                            "admin_level": str(row.get("admin_level", "")).strip(),
+                            "pathogen": str(row.get("pathogen", "")).strip(),
+                            "assumption": str(row.get("assumption", "")).strip(),
+                        })
+            except Exception as exc:
+                logger.warning("Could not fetch assumptions for '%s': %s", key, exc)
+    return results
+
+
+async def update_isodata_projected_variables(
+    isodata_path: Path,
+    ssp: str,
+    year: int,
+    is_country_level: bool,
+) -> list[dict]:
+    """Update fraction_urban_pop, fraction_pop_under5, and hdi in isodata.csv.
+
+    - **fraction_urban_pop**: For country-level (admin 0) analysis, fetched from
+      ``world_urbanisation_level0_future.csv`` for the given SSP/year.
+      For sub-national analysis, the baseline degree is kept unchanged.
+    - **fraction_pop_under5**: Fetched from ``world-population-future.csv`` (SSP-independent),
+      filtered by year.  Mapped via the parent-country alpha3 (``iso_country`` or ``gid[:3]``).
+    - **hdi**: Fetched from ``hdi_future.csv`` for the given SSP/year.  Country-level
+      values are used for both national and sub-national analyses.
+
+    The CSV at *isodata_path* is updated in-place.
+
+    Returns a list of assumption dicts to include in the summary.
+    """
+    df = pd.read_csv(isodata_path)
+
+    # Identify the alpha3 column (used to join projection datasets).
+    alpha3_col: str | None = next(
+        (c for c in ["iso_country", "alpha3"] if c in df.columns), None
+    )
+    if alpha3_col is None:
+        # Fall back: if gids are 3-char they ARE alpha3.
+        gid_col = next((c for c in ["gid"] if c in df.columns), None)
+        if gid_col and df[gid_col].astype(str).str.len().max() <= 3:
+            alpha3_col = gid_col
+        else:
+            # For sub-national GIDs like "UGA.1_1", take first 3 chars.
+            if gid_col:
+                df["_alpha3_tmp"] = df[gid_col].astype(str).str[:3]
+                alpha3_col = "_alpha3_tmp"
+    if alpha3_col is None:
+        logger.warning("update_isodata_projected_variables: no alpha3 column found in %s", isodata_path)
+        return []
+
+    alpha3_list = df[alpha3_col].astype(str).str.strip().unique().tolist()
+
+    dataset_keys = ["hdi", "population"]
+
+    # --- HDI ------------------------------------------------------------
+    if "hdi" in df.columns:
+        hdi_map = await fetch_hdi_projection(alpha3_list, ssp, year)
+        if hdi_map:
+            updated = df[alpha3_col].astype(str).str.strip().map(hdi_map)
+            df["hdi"] = updated.combine_first(df["hdi"])
+            logger.info("Updated hdi for %d areas", updated.notna().sum())
+
+    # --- fraction_pop_under5 -------------------------------------------
+    fuf_col = next((c for c in ["fraction_pop_under5", "fractionUnderFive"] if c in df.columns), None)
+    if fuf_col:
+        fuf_map = await fetch_fraction_under_five_projection(alpha3_list, year)
+        if fuf_map:
+            updated = df[alpha3_col].astype(str).str.strip().map(fuf_map)
+            df[fuf_col] = updated.combine_first(df[fuf_col])
+            logger.info("Updated %s for %d areas", fuf_col, updated.notna().sum())
+
+    # --- fraction_urban_pop (country-level only) -----------------------
+    urb_col = next((c for c in ["fraction_urban_pop", "fractionUrban"] if c in df.columns), None)
+    if urb_col:
+        if is_country_level:
+            dataset_keys.append("urbanization")
+            urb_map = await fetch_urbanization_level0_projection(alpha3_list, ssp, year)
+            if urb_map:
+                updated = df[alpha3_col].astype(str).str.strip().map(urb_map)
+                df[urb_col] = updated.combine_first(df[urb_col])
+                logger.info("Updated %s for %d areas (country-level)", urb_col, updated.notna().sum())
+        else:
+            # Sub-national: keep baseline urbanization intact.
+            dataset_keys.append("urbanization")
+
+    # Drop temporary column if we added one.
+    if "_alpha3_tmp" in df.columns:
+        df = df.drop(columns=["_alpha3_tmp"])
+
+    df.to_csv(isodata_path, index=False)
+
+    return await fetch_assumptions(dataset_keys)
 
 
 def _session_shapefile_path(session_dir: Path) -> Path:
