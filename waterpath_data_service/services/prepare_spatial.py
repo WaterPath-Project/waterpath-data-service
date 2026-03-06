@@ -108,9 +108,11 @@ def prepare_spatial_inputs(
         Directory where output files are written.
     res:
         Target raster resolution in decimal degrees.  When ``None`` (default)
-        the resolution is auto-selected so that the smallest dimension of the
-        study-area bounding box spans at least 20 pixels, clamped to the range
-        [0.001°, 0.5°].  Pass an explicit value to override.
+        the resolution is auto-selected by targeting ~100 pixels across the
+        bounding-box diagonal, floored at the source TIF's native pixel size
+        (so grids finer than the source are never generated), clamped to 0.5°,
+        and snapped to the nearest standard value.  Pass an explicit value to
+        override.
         Typical values:
           - 0.5°  → ~55 km at equator  (national / global)
           - 0.1°  → ~11 km             (regional)
@@ -190,17 +192,25 @@ def prepare_spatial_inputs(
     xmax_data = max(b[2] for b in all_bounds)
     ymax_data = max(b[3] for b in all_bounds)
 
-    # Auto-select resolution when not supplied: aim for ≥ 20 pixels across the
-    # smallest extent dimension, clamped to [0.001°, 0.5°].
+    # Auto-select resolution when not supplied.
+    # Strategy: target ~100 pixels across the bounding-box diagonal so both
+    # small (city) and large (country) study areas get a sensible default.
+    # The raw target is floored at the source TIF's native pixel size to
+    # prevent generating a grid finer than the source data (which would invent
+    # spatial detail that does not exist), clamped to 0.5°, then snapped to
+    # the nearest standard "nice" value for clean grid alignment.
     if res is None:
         extent_x = xmax_data - xmin_data
         extent_y = ymax_data - ymin_data
-        min_extent = min(extent_x, extent_y)
-        auto_res = min_extent / 20.0
-        res = float(max(0.001, min(0.5, auto_res)))
+        diagonal = math.hypot(extent_x, extent_y)
+        src_native_res = _native_tif_resolution(pop_raster_path)
+        target = diagonal / 100.0
+        raw = max(src_native_res, min(0.5, target))
+        res = _round_to_nice_res(raw)
         logger.info(
-            "Auto-selected resolution: %.5f° (extent %.4f° × %.4f°)",
-            res, extent_x, extent_y,
+            "Auto-selected resolution: %.5f° "
+            "(diagonal %.4f°, source native %.5f°, extent %.4f° × %.4f°)",
+            res, diagonal, src_native_res, extent_x, extent_y,
         )
 
     # Pad by one cell on every side (mirrors R's ``padding = 1``)
@@ -222,7 +232,21 @@ def prepare_spatial_inputs(
     # ------------------------------------------------------------------
     # Step 4 – Rasterize polygons → isoraster.tif
     # ------------------------------------------------------------------
-    shapes = [(feat["geometry"], iso_ids[i]) for i, feat in enumerate(features)]
+    # Sort by bounding-box area descending: large polygons burn first so that
+    # small polygons burn last and can reclaim contested border pixels from
+    # their larger neighbours.  Without this ordering, tiny districts in dense
+    # urban areas (e.g. Dhaka thanas) may be fully overwritten and end up
+    # with zero pixels → zero projected population.
+    shapes = [
+        s for _, s in sorted(
+            (
+                ((b[2] - b[0]) * (b[3] - b[1]), (feat["geometry"], iso_ids[i]))
+                for i, (feat, b) in enumerate(zip(features, all_bounds))
+            ),
+            key=lambda x: x[0],
+            reverse=True,
+        )
+    ]
     isoraster_arr = rasterize(
         shapes,
         out_shape=(height, width),
@@ -288,6 +312,26 @@ def prepare_spatial_inputs(
         "pop_urban": str(pop_urban_path),
         "pop_rural": str(pop_rural_path),
     }
+
+
+# ---------------------------------------------------------------------------
+# Resolution helpers
+# ---------------------------------------------------------------------------
+
+#: Standard output resolutions in decimal degrees.  Auto-selection snaps to
+#: the nearest entry so output grids align on clean boundaries.
+_NICE_RESOLUTIONS = [0.001, 0.002, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5]
+
+
+def _native_tif_resolution(pop_raster_path: str) -> float:
+    """Return the x-pixel size (degrees) of the source population raster."""
+    with rasterio.open(pop_raster_path) as src:
+        return abs(src.transform.a)
+
+
+def _round_to_nice_res(res: float) -> float:
+    """Snap *res* to the nearest value in :data:`_NICE_RESOLUTIONS`."""
+    return min(_NICE_RESOLUTIONS, key=lambda v: abs(v - res))
 
 
 # ---------------------------------------------------------------------------

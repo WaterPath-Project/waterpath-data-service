@@ -618,10 +618,26 @@ def update_human_emissions_population(
     if "population" not in df.columns:
         raise ValueError("isodata.csv missing 'population' column")
 
+    # Capture baseline values before overwriting.  The CSV was copied from
+    # the baseline directory immediately before this function was called, so
+    # df["population"] is still the baseline population at this point.
+    baseline_pop = df["population"].copy()
     df["population"] = df[csv_gid_column].astype(str).map(zone_population)
-    if df["population"].isna().any():
-        df["population"] = df["population"].fillna(0)
-    df["population"] = df["population"].astype(int)
+    # Zones with 0 projected population indicate a rasterization gap (tiny
+    # polygon overwritten by neighbours) or a water/nodata TIF cell (e.g.
+    # river islands).  Both are data failures – fall back to the baseline
+    # value rather than writing a misleading zero.
+    zero_mask = df["population"].isna() | (df["population"] == 0)
+    if zero_mask.any():
+        n_fallback = int(zero_mask.sum())
+        logger.warning(
+            "Projected population is 0 for %d area(s) (raster gap or water "
+            "coverage) – retaining baseline values: %s",
+            n_fallback,
+            df.loc[zero_mask, csv_gid_column].tolist(),
+        )
+        df.loc[zero_mask, "population"] = baseline_pop[zero_mask]
+    df["population"] = df["population"].fillna(0).astype(int)
     df.to_csv(human_emissions_path, index=False)
     logger.info(
         "Updated population in %s for %d areas (total: %s)",

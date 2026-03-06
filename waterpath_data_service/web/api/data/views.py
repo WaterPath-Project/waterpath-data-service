@@ -578,7 +578,7 @@ async def download_projection(
             total_baseline = int(merged_stats["population_baseline"].sum())
             total_projected = int(merged_stats["population_projected"].sum())
             total_diff = total_projected - total_baseline
-            summary = {
+            _schema_entry = {
                 "schema": schema_norm,
                 "ssp": ssp_norm,
                 "year": year,
@@ -591,13 +591,14 @@ async def download_projection(
                 "assumptions": assumptions,
             }
         else:
-            summary = {
+            _schema_entry = {
                 "schema": schema_norm,
                 "ssp": ssp_norm,
                 "year": year,
                 "n_areas": len(projected_df),
                 "assumptions": assumptions,
             }
+        summary = {"schemas": [_schema_entry]}
 
         # Build the zip entirely in memory.
         zip_buffer = io.BytesIO()
@@ -686,22 +687,33 @@ async def generate_input_data_package(session_id: str, gids: str):
             package = Package(resources=resources)
             package.to_json(str(session_dir / "datapackage.json"))
 
-            # Fetch assumptions and write a summary.json alongside the datapackage.
+            # Fetch assumptions per schema and write a summary.json alongside
+            # the datapackage.  Each schema entry lists only the assumption
+            # datasets relevant to that schema so the structure is extensible
+            # when more projection schemas are added in the future.
             try:
-                dataset_keys_for_assumptions = ["urbanization", "population", "hdi"]
-                if is_country_level or data.get("_treatment_used_fractions"):
-                    dataset_keys_for_assumptions.append("treatment_fractions")
-                assumptions = await fetch_assumptions(dataset_keys_for_assumptions)
-                # For country-level (admin 0) analysis, exclude assumptions that are
-                # only relevant for sub-national (admin_level > 0) analyses.
-                if is_country_level:
-                    assumptions = [
-                        a for a in assumptions
-                        if a.get("admin_level", "all") in ("national", "all", "")
-                    ]
+                use_treatment_fractions = is_country_level or bool(data.get("_treatment_used_fractions"))
+                _schema_assumption_keys: dict[str, list[str]] = {
+                    "population": ["urbanization", "population", "hdi"],
+                    "sanitation": [],
+                    "treatment": ["treatment_fractions"] if use_treatment_fractions else [],
+                }
+                schemas_list = []
+                for sname in schemas:
+                    keys = _schema_assumption_keys.get(sname, [])
+                    if keys:
+                        a = await fetch_assumptions(keys)
+                        if is_country_level:
+                            a = [
+                                x for x in a
+                                if x.get("admin_level", "all") in ("national", "all", "")
+                            ]
+                    else:
+                        a = []
+                    schemas_list.append({"schema": sname, "assumptions": a})
                 summary_data = {
                     "session_id": session_id,
-                    "assumptions": assumptions,
+                    "schemas": schemas_list,
                 }
                 with open(str(session_dir / "summary.json"), "w", encoding="utf-8") as sf:
                     json.dump(summary_data, sf, indent=2)
@@ -744,7 +756,11 @@ async def generate_input_data_package(session_id: str, gids: str):
         raise HTTPException(status_code=500, detail="Invalid Session ID provided.")
     with open(str(session_dir / "datapackage.json")) as f:
         d = json.load(f)
-        return d
+    summary_path = session_dir / "summary.json"
+    if summary_path.is_file():
+        with open(summary_path) as sf:
+            d["summary"] = json.load(sf)
+    return d
 
 
 @router.get("/input/validate")
