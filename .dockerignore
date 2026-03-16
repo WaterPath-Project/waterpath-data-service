@@ -1,5 +1,8 @@
 ### Python template
 
+# Large static data files — mounted as a volume at runtime instead
+waterpath_data_service/static/data/
+
 deploy/
 .idea/
 .vscode/
