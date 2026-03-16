@@ -63,9 +63,9 @@ import math
 from pathlib import Path
 from typing import Dict, List
 
-import fiona
 import numpy as np
 import pandas as pd
+import pyogrio
 import rasterio
 from rasterio.features import rasterize
 from rasterio.transform import from_bounds
@@ -129,8 +129,7 @@ def prepare_spatial_inputs(
     # ------------------------------------------------------------------
     # Step 1 – Read the shapefile
     # ------------------------------------------------------------------
-    with fiona.open(geodata_path) as src:
-        features = list(src)
+    features = pyogrio.read_dataframe(geodata_path)
 
     n_features = len(features)
     logger.info("Shapefile: %d features loaded from %s", n_features, geodata_path)
@@ -168,13 +167,12 @@ def prepare_spatial_inputs(
     # Priority: GID_3 > GID_2 > GID_1 > GID_0 (highest admin level present).
     iso_ids: List[int] = []
     id_to_gid: Dict[int, str] = {}
-    for idx, feat in enumerate(features):
-        props = feat["properties"]
+    for idx, (_, feat) in enumerate(features.iterrows()):
         gid = str(
-            props.get("GID_3")
-            or props.get("GID_2")
-            or props.get("GID_1")
-            or props.get("GID_0")
+            feat.get("GID_3")
+            or feat.get("GID_2")
+            or feat.get("GID_1")
+            or feat.get("GID_0")
             or str(idx + 1)
         ).strip()
         # Burn the iso integer from isodata.csv; fall back to feature order
@@ -186,11 +184,8 @@ def prepare_spatial_inputs(
     # ------------------------------------------------------------------
     # Step 3 – Determine target grid extent and transform
     # ------------------------------------------------------------------
-    all_bounds = [fiona.bounds(f) for f in features]
-    xmin_data = min(b[0] for b in all_bounds)
-    ymin_data = min(b[1] for b in all_bounds)
-    xmax_data = max(b[2] for b in all_bounds)
-    ymax_data = max(b[3] for b in all_bounds)
+    all_bounds = [geom.bounds for geom in features.geometry]
+    xmin_data, ymin_data, xmax_data, ymax_data = features.total_bounds.tolist()
 
     # Auto-select resolution when not supplied.
     # Strategy: target ~100 pixels across the bounding-box diagonal so both
@@ -240,8 +235,8 @@ def prepare_spatial_inputs(
     shapes = [
         s for _, s in sorted(
             (
-                ((b[2] - b[0]) * (b[3] - b[1]), (feat["geometry"], iso_ids[i]))
-                for i, (feat, b) in enumerate(zip(features, all_bounds))
+                ((b[2] - b[0]) * (b[3] - b[1]), (geom.__geo_interface__, iso_ids[i]))
+                for i, (geom, b) in enumerate(zip(features.geometry, all_bounds))
             ),
             key=lambda x: x[0],
             reverse=True,

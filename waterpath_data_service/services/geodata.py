@@ -26,16 +26,30 @@ def geonames(admin: str, level: int) -> pd.DataFrame:
     return names_df
 
 
-def shapefile(areas: str, path: str) -> str:
-    level = areas[0].count(".")
-    gdf = pygadm.Items(admin=areas, content_level=level)
+def shapefile(areas: str | list[str], path: str) -> str:
+    if isinstance(areas, str):
+        area_list = [x.strip() for x in areas.split(",") if x.strip()]
+    else:
+        area_list = [str(x).strip() for x in areas if str(x).strip()]
+
+    if not area_list:
+        raise ValueError("No areas provided to build shapefile")
+
+    level = area_list[0].count(".")
+    gdf = pygadm.Items(admin=area_list, content_level=level)
+
+    # pygadm geometries should be WGS84; enforce CRS metadata so downstream
+    # reprojection (temperature clipping) does not fail on naive geometries.
+    if gdf.crs is None:
+        gdf = gdf.set_crs("EPSG:4326")
+
     geodata_path = "geodata"
     path = str(Path(path))
     geo_path = path + os.sep + geodata_path
     if not os.path.isdir(geo_path):
         os.mkdir(geo_path)
     file_path = geo_path + os.sep +"geodata.shp"
-    file = gdf.to_file(file_path)
+    gdf.to_file(file_path)
     return file_path
 
 

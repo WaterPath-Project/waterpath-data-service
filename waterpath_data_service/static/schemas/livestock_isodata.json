@@ -1,0 +1,109 @@
+{
+    "title": "Livestock animal isodata schema",
+    "description": "Animal-specific parameters used to estimate livestock pathogen emissions.",
+    "fields": [
+        {
+            "name": "iso",
+            "type": "integer",
+            "title": "Animal isoraster zone identifier",
+            "description": "Integer identifier that maps rows to livestock animal isoraster values.",
+            "constraints": {
+                "minimum": 1
+            }
+        },
+        {
+            "name": "frac_young",
+            "type": "number",
+            "title": "Fraction young",
+            "description": "Fraction of young animals in the population.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "prev_young",
+            "type": "number",
+            "title": "Prevalence young",
+            "description": "Pathogen prevalence in young animals.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "prev_adult",
+            "type": "number",
+            "title": "Prevalence adult",
+            "description": "Pathogen prevalence in adult animals.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
+        },
+        {
+            "name": "excr_young",
+            "type": "number",
+            "title": "Excretion young",
+            "description": "Pathogen excretion per gram manure from young animals.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0
+            }
+        },
+        {
+            "name": "excr_adult",
+            "type": "number",
+            "title": "Excretion adult",
+            "description": "Pathogen excretion per gram manure from adult animals.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0
+            }
+        },
+        {
+            "name": "excr_day",
+            "type": "number",
+            "title": "Excretion per day",
+            "description": "Pathogen excretion per day, used for ducks and chickens.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0
+            }
+        },
+        {
+            "name": "mass_young",
+            "type": "number",
+            "title": "Young mass",
+            "description": "Body mass of a young animal (kg).",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0
+            }
+        },
+        {
+            "name": "mass_adult",
+            "type": "number",
+            "title": "Adult mass",
+            "description": "Body mass of an adult animal (kg).",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0
+            }
+        },
+        {
+            "name": "manure_per_mass",
+            "type": "number",
+            "title": "Manure per mass",
+            "description": "Yearly manure production per animal mass.",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0
+            }
+        }
+    ],
+    "missingValues": ["", "N/A", "NA", "n/a"]
+}

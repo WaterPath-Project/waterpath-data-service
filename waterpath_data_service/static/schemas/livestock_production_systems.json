@@ -1,0 +1,207 @@
+{
+    "title": "Livestock production systems schema",
+    "description": "Fractions of intensive and extensive livestock production systems by administrative area.",
+    "fields": [
+        {
+            "name": "iso",
+            "type": "integer",
+            "title": "Integer zone identifier",
+            "description": "Integer zone identifier matching the isoraster domain.",
+            "constraints": {
+                "minimum": 1
+            }
+        },
+        {
+            "name": "gid",
+            "type": "string",
+            "title": "GADM ID for country/subarea",
+            "description": "Administrative area identifier."
+        },
+        {
+            "name": "meat_i",
+            "type": "number",
+            "title": "Meat intensive fraction",
+            "description": "Fraction of intensive production for meat cattle systems.",
+            "float_number": true,
+            "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "dairy_i",
+            "type": "number",
+            "title": "Dairy intensive fraction",
+            "description": "Fraction of intensive production for dairy cattle systems.",
+            "float_number": true,
+            "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "buffaloes_i",
+            "type": "number",
+            "title": "Buffaloes intensive fraction",
+            "description": "Fraction of intensive production for buffaloes.",
+            "float_number": true,
+            "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "pigs_i",
+            "type": "number",
+            "title": "Pigs intensive fraction",
+            "description": "Fraction of intensive production for pigs.",
+            "float_number": true,
+            "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "poultry_i",
+            "type": "number",
+            "title": "Poultry intensive fraction",
+            "description": "Fraction of intensive production for poultry.",
+            "float_number": true,
+            "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "sheep_i",
+            "type": "number",
+            "title": "Sheep intensive fraction",
+            "description": "Fraction of intensive production for sheep.",
+            "float_number": true,
+            "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "goats_i",
+            "type": "number",
+            "title": "Goats intensive fraction",
+            "description": "Fraction of intensive production for goats.",
+            "float_number": true,
+            "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "horses_i",
+            "type": "number",
+            "title": "Horses intensive fraction",
+            "description": "Fraction of intensive production for horses.",
+            "float_number": true,
+            "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "asses_i",
+            "type": "number",
+            "title": "Asses intensive fraction",
+            "description": "Fraction of intensive production for asses.",
+            "float_number": true,
+            "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "mules_i",
+            "type": "number",
+            "title": "Mules intensive fraction",
+            "description": "Fraction of intensive production for mules.",
+            "float_number": true,
+            "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "camels_i",
+            "type": "number",
+            "title": "Camels intensive fraction",
+            "description": "Fraction of intensive production for camels.",
+            "float_number": true,
+            "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "meat_e",
+            "type": "number",
+            "title": "Meat extensive fraction",
+            "description": "Fraction of extensive production for meat cattle systems.",
+            "float_number": true,
+            "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "dairy_e",
+            "type": "number",
+            "title": "Dairy extensive fraction",
+            "description": "Fraction of extensive production for dairy cattle systems.",
+            "float_number": true,
+            "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "buffaloes_e",
+            "type": "number",
+            "title": "Buffaloes extensive fraction",
+            "description": "Fraction of extensive production for buffaloes.",
+            "float_number": true,
+            "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "pigs_e",
+            "type": "number",
+            "title": "Pigs extensive fraction",
+            "description": "Fraction of extensive production for pigs.",
+            "float_number": true,
+            "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "poultry_e",
+            "type": "number",
+            "title": "Poultry extensive fraction",
+            "description": "Fraction of extensive production for poultry.",
+            "float_number": true,
+            "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "sheep_e",
+            "type": "number",
+            "title": "Sheep extensive fraction",
+            "description": "Fraction of extensive production for sheep.",
+            "float_number": true,
+            "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "goats_e",
+            "type": "number",
+            "title": "Goats extensive fraction",
+            "description": "Fraction of extensive production for goats.",
+            "float_number": true,
+            "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "horses_e",
+            "type": "number",
+            "title": "Horses extensive fraction",
+            "description": "Fraction of extensive production for horses.",
+            "float_number": true,
+            "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "asses_e",
+            "type": "number",
+            "title": "Asses extensive fraction",
+            "description": "Fraction of extensive production for asses.",
+            "float_number": true,
+            "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "mules_e",
+            "type": "number",
+            "title": "Mules extensive fraction",
+            "description": "Fraction of extensive production for mules.",
+            "float_number": true,
+            "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "camels_e",
+            "type": "number",
+            "title": "Camels extensive fraction",
+            "description": "Fraction of extensive production for camels.",
+            "float_number": true,
+            "constraints": {"minimum": 0, "maximum": 1}
+        }
+    ],
+    "missingValues": ["", "N/A", "NA", "n/a"],
+    "foreignKeys": [
+        {
+            "fields": "gid",
+            "reference": {
+                "resource": "population",
+                "fields": "gid"
+            }
+        }
+    ]
+}

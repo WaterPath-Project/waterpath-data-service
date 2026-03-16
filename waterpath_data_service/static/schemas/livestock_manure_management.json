@@ -1,0 +1,115 @@
+{
+    "title": "Livestock manure management systems schema",
+    "description": "Fractions of manure management systems by livestock type and administrative area.",
+    "fields": [
+        {
+            "name": "iso",
+            "type": "integer",
+            "title": "Integer zone identifier",
+            "description": "Integer zone identifier matching the isoraster domain.",
+            "constraints": {"minimum": 1}
+        },
+        {
+            "name": "gid",
+            "type": "string",
+            "title": "GADM ID for country/subarea",
+            "description": "Administrative area identifier."
+        },
+
+        {"name": "PP_cattle", "type": "number", "title": "PP cattle", "description": "Pasture/range/paddock fraction for cattle.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "DS_cattle", "type": "number", "title": "DS cattle", "description": "Daily spread fraction for cattle.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "SS_cattle", "type": "number", "title": "SS cattle", "description": "Solid storage fraction for cattle.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "DL_cattle", "type": "number", "title": "DL cattle", "description": "Dry lot fraction for cattle.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "LS_cattle", "type": "number", "title": "LS cattle", "description": "Liquid/slurry storage fraction for cattle.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "UAL_cattle", "type": "number", "title": "UAL cattle", "description": "Uncovered anaerobic lagoon fraction for cattle.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "AD_cattle", "type": "number", "title": "AD cattle", "description": "Anaerobic digester fraction for cattle.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "BF_cattle", "type": "number", "title": "BF cattle", "description": "Burned for fuel fraction for cattle.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "O_cattle", "type": "number", "title": "Other cattle", "description": "Other systems fraction for cattle.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+
+        {"name": "PP_buffaloes", "type": "number", "title": "PP buffaloes", "description": "Pasture/range/paddock fraction for buffaloes.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "DS_buffaloes", "type": "number", "title": "DS buffaloes", "description": "Daily spread fraction for buffaloes.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "SS_buffaloes", "type": "number", "title": "SS buffaloes", "description": "Solid storage fraction for buffaloes.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "DL_buffaloes", "type": "number", "title": "DL buffaloes", "description": "Dry lot fraction for buffaloes.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "LS_buffaloes", "type": "number", "title": "LS buffaloes", "description": "Liquid/slurry storage fraction for buffaloes.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "UAL_buffaloes", "type": "number", "title": "UAL buffaloes", "description": "Uncovered anaerobic lagoon fraction for buffaloes.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "AD_buffaloes", "type": "number", "title": "AD buffaloes", "description": "Anaerobic digester fraction for buffaloes.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "BF_buffaloes", "type": "number", "title": "BF buffaloes", "description": "Burned for fuel fraction for buffaloes.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "O_buffaloes", "type": "number", "title": "Other buffaloes", "description": "Other systems fraction for buffaloes.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+
+        {"name": "UAL_pigs", "type": "number", "title": "UAL pigs", "description": "Uncovered anaerobic lagoon fraction for pigs.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "LS_pigs", "type": "number", "title": "LS pigs", "description": "Liquid/slurry storage fraction for pigs.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "SS_pigs", "type": "number", "title": "SS pigs", "description": "Solid storage fraction for pigs.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "DL_pigs", "type": "number", "title": "DL pigs", "description": "Dry lot fraction for pigs.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "Pl1_pigs", "type": "number", "title": "Pl1 pigs", "description": "Pit storage < 1 month fraction for pigs.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "Ph1_pigs", "type": "number", "title": "Ph1 pigs", "description": "Pit storage > 1 month fraction for pigs.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "DS_pigs", "type": "number", "title": "DS pigs", "description": "Daily spread fraction for pigs.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "AD_pigs", "type": "number", "title": "AD pigs", "description": "Anaerobic digester fraction for pigs.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "O_pigs", "type": "number", "title": "Other pigs", "description": "Other systems fraction for pigs.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+
+        {"name": "UAL_poultry", "type": "number", "title": "UAL poultry", "description": "Uncovered anaerobic lagoon fraction for poultry.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "LS_poultry", "type": "number", "title": "LS poultry", "description": "Liquid/slurry storage fraction for poultry.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "DS_poultry", "type": "number", "title": "DS poultry", "description": "Daily spread fraction for poultry.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "SSDL_poultry", "type": "number", "title": "SSDL poultry", "description": "Solid storage and dry lot fraction for poultry.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "PP_poultry", "type": "number", "title": "PP poultry", "description": "Pasture/range/paddock fraction for poultry.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "BF_poultry", "type": "number", "title": "BF poultry", "description": "Burned for fuel fraction for poultry.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "O_poultry", "type": "number", "title": "Other poultry", "description": "Other systems fraction for poultry.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+
+        {"name": "UAL_sheep", "type": "number", "title": "UAL sheep", "description": "Uncovered anaerobic lagoon fraction for sheep.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "LS_sheep", "type": "number", "title": "LS sheep", "description": "Liquid/slurry storage fraction for sheep.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "DS_sheep", "type": "number", "title": "DS sheep", "description": "Daily spread fraction for sheep.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "SSDL_sheep", "type": "number", "title": "SSDL sheep", "description": "Solid storage and dry lot fraction for sheep.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "PP_sheep", "type": "number", "title": "PP sheep", "description": "Pasture/range/paddock fraction for sheep.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "BF_sheep", "type": "number", "title": "BF sheep", "description": "Burned for fuel fraction for sheep.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "O_sheep", "type": "number", "title": "Other sheep", "description": "Other systems fraction for sheep.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+
+        {"name": "UAL_goats", "type": "number", "title": "UAL goats", "description": "Uncovered anaerobic lagoon fraction for goats.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "LS_goats", "type": "number", "title": "LS goats", "description": "Liquid/slurry storage fraction for goats.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "DS_goats", "type": "number", "title": "DS goats", "description": "Daily spread fraction for goats.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "SSDL_goats", "type": "number", "title": "SSDL goats", "description": "Solid storage and dry lot fraction for goats.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "PP_goats", "type": "number", "title": "PP goats", "description": "Pasture/range/paddock fraction for goats.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "BF_goats", "type": "number", "title": "BF goats", "description": "Burned for fuel fraction for goats.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "O_goats", "type": "number", "title": "Other goats", "description": "Other systems fraction for goats.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+
+        {"name": "UAL_horses", "type": "number", "title": "UAL horses", "description": "Uncovered anaerobic lagoon fraction for horses.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "LS_horses", "type": "number", "title": "LS horses", "description": "Liquid/slurry storage fraction for horses.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "DS_horses", "type": "number", "title": "DS horses", "description": "Daily spread fraction for horses.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "SSDL_horses", "type": "number", "title": "SSDL horses", "description": "Solid storage and dry lot fraction for horses.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "PP_horses", "type": "number", "title": "PP horses", "description": "Pasture/range/paddock fraction for horses.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "BF_horses", "type": "number", "title": "BF horses", "description": "Burned for fuel fraction for horses.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "O_horses", "type": "number", "title": "Other horses", "description": "Other systems fraction for horses.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+
+        {"name": "UAL_mules", "type": "number", "title": "UAL mules", "description": "Uncovered anaerobic lagoon fraction for mules.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "LS_mules", "type": "number", "title": "LS mules", "description": "Liquid/slurry storage fraction for mules.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "DS_mules", "type": "number", "title": "DS mules", "description": "Daily spread fraction for mules.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "SSDL_mules", "type": "number", "title": "SSDL mules", "description": "Solid storage and dry lot fraction for mules.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "PP_mules", "type": "number", "title": "PP mules", "description": "Pasture/range/paddock fraction for mules.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "BF_mules", "type": "number", "title": "BF mules", "description": "Burned for fuel fraction for mules.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "O_mules", "type": "number", "title": "Other mules", "description": "Other systems fraction for mules.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+
+        {"name": "UAL_asses", "type": "number", "title": "UAL asses", "description": "Uncovered anaerobic lagoon fraction for asses.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "LS_asses", "type": "number", "title": "LS asses", "description": "Liquid/slurry storage fraction for asses.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "DS_asses", "type": "number", "title": "DS asses", "description": "Daily spread fraction for asses.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "SSDL_asses", "type": "number", "title": "SSDL asses", "description": "Solid storage and dry lot fraction for asses.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "PP_asses", "type": "number", "title": "PP asses", "description": "Pasture/range/paddock fraction for asses.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "BF_asses", "type": "number", "title": "BF asses", "description": "Burned for fuel fraction for asses.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "O_asses", "type": "number", "title": "Other asses", "description": "Other systems fraction for asses.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+
+        {"name": "UAL_camels", "type": "number", "title": "UAL camels", "description": "Uncovered anaerobic lagoon fraction for camels.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "LS_camels", "type": "number", "title": "LS camels", "description": "Liquid/slurry storage fraction for camels.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "DS_camels", "type": "number", "title": "DS camels", "description": "Daily spread fraction for camels.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "SSDL_camels", "type": "number", "title": "SSDL camels", "description": "Solid storage and dry lot fraction for camels.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "PP_camels", "type": "number", "title": "PP camels", "description": "Pasture/range/paddock fraction for camels.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "BF_camels", "type": "number", "title": "BF camels", "description": "Burned for fuel fraction for camels.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}},
+        {"name": "O_camels", "type": "number", "title": "Other camels", "description": "Other systems fraction for camels.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}}
+    ],
+    "missingValues": ["", "N/A", "NA", "n/a"],
+    "foreignKeys": [
+        {
+            "fields": "gid",
+            "reference": {
+                "resource": "population",
+                "fields": "gid"
+            }
+        }
+    ]
+}

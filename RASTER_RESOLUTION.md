@@ -52,13 +52,14 @@ raster** (read directly from the TIF header via `rasterio`):
 raw = max(src_native_res, min(0.5°, target))
 ```
 
-This is the critical guard against the Dhaka problem.  The bundled WorldPop
-1 km TIFs have a native resolution of approximately **0.00833°** (~926 m at
-the equator).  Generating a 0.004° output from a 0.00833° source would require
-inventing sub-pixel detail, yielding near-zero population counts in small
-polygons because each tiny destination pixel samples only a fraction of one
-source pixel.  By flooring at `src_native_res`, the minimum output resolution
-is always at least as coarse as the source.
+This is the critical guard against **one cause** of the Dhaka zero-population
+problem.  The bundled WorldPop / GHS-POP 1 km TIFs have a native resolution of
+approximately **0.00833°** (~926 m at the equator).  Generating a 0.004° output
+from a 0.00833° source would require inventing sub-pixel detail, yielding
+near-zero population counts in small polygons because each tiny destination
+pixel samples only a fraction of one source pixel.  By flooring at
+`src_native_res`, the minimum output resolution is always at least as coarse
+as the source.
 
 ### Step 3 — Snap to a standard value
 
@@ -154,8 +155,57 @@ Because `raw = max(src_native_res, ...)`, the destination pixel is always **≥*
 the source pixel.  The pipeline is therefore never run in pure upsampling
 (fine→coarser) mode.  Using `Resampling.average` for downsampling (coarse→
 fine) would spread one source pixel's value uniformly across many destination
-pixels, producing an artificially smooth and sometimes near-zero output—exactly
-the Dhaka bug the floor constraint prevents.
+pixels, producing an artificially smooth and sometimes near-zero output.
+
+---
+
+## Polygon Rasterization (isoraster.tif)
+
+### Burn order: largest polygons first
+
+`rasterio.features.rasterize` renders shapes in list order and later shapes
+**overwrite** earlier ones at contested pixels.  When all polygons are adjacent
+(e.g. the ~54 Dhaka thanas), a small polygon that appears early in the
+shapefile feature list can have every one of its raster cells claimed by a
+later, larger neighbour.  The result is a zone with zero pixels → `nansum`
+returns 0 → projected population is written as 0.
+
+**Fix** ([prepare_spatial.py](waterpath_data_service/services/prepare_spatial.py)):
+sort the shape list by bounding-box area **descending** before passing it to
+`rasterize`.  Large polygons burn first; small polygons burn last and can
+reclaim disputed border cells.
+
+```python
+shapes = [
+    s for _, s in sorted(
+        ((bbox_area, shape_tuple) for ...), key=..., reverse=True
+    )
+]
+```
+
+### Zero-population fallback to baseline
+
+Even after sorting, some zones can still receive zero projected population:
+
+- A polygon is **smaller than one pixel** at the chosen resolution – it claims
+  a raster cell but the TIF source pixel for that cell is water/nodata
+  (e.g. Kamrangir Char, a river island in Dhaka, whose WorldPop pixels are
+  nodata by definition).
+- A polygon shares its single pixel with a neighbour that wins the
+  `all_touched=True` tiebreak.
+
+In both cases, writing 0 to the CSV would be a data fabrication.  The
+implementation ([projections.py](waterpath_data_service/services/projections.py))
+instead retains the **baseline population** for any such zone and logs a
+warning listing the affected area identifiers:
+
+```
+WARNING: Projected population is 0 for N area(s) (raster gap or water
+coverage) – retaining baseline values: ['BGD.3.1.20_1', ...]
+```
+
+This means the projection for those areas is effectively a copy of the
+baseline, which is the least-bad option given the source data constraints.
 
 ---
 

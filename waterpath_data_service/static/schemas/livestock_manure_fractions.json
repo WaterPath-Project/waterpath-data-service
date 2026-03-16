@@ -1,0 +1,173 @@
+{
+    "title": "Livestock manure fractions schema",
+    "description": "Fractions partitioning manure to grazing/land and other uses by production system and livestock type.",
+    "fields": [
+        {
+            "name": "iso",
+            "type": "integer",
+            "title": "Integer zone identifier",
+            "description": "Integer zone identifier matching the isoraster domain.",
+            "constraints": {
+                "minimum": 1
+            }
+        },
+        {
+            "name": "gid",
+            "type": "string",
+            "title": "GADM ID for country/subarea",
+            "description": "Administrative area identifier."
+        },
+        {
+            "name": "meat_fgi", "type": "number", "title": "Meat fgi", "description": "Manure fraction to grazing/land in intensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "meat_fge", "type": "number", "title": "Meat fge", "description": "Manure fraction to grazing/land in extensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "meat_foi", "type": "number", "title": "Meat foi", "description": "Manure fraction to other uses in intensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "meat_foe", "type": "number", "title": "Meat foe", "description": "Manure fraction to other uses in extensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+
+        {
+            "name": "dairy_fgi", "type": "number", "title": "Dairy fgi", "description": "Manure fraction to grazing/land in intensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "dairy_fge", "type": "number", "title": "Dairy fge", "description": "Manure fraction to grazing/land in extensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "dairy_foi", "type": "number", "title": "Dairy foi", "description": "Manure fraction to other uses in intensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "dairy_foe", "type": "number", "title": "Dairy foe", "description": "Manure fraction to other uses in extensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+
+        {
+            "name": "buffaloes_fgi", "type": "number", "title": "Buffaloes fgi", "description": "Manure fraction to grazing/land in intensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "buffaloes_fge", "type": "number", "title": "Buffaloes fge", "description": "Manure fraction to grazing/land in extensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "buffaloes_foi", "type": "number", "title": "Buffaloes foi", "description": "Manure fraction to other uses in intensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "buffaloes_foe", "type": "number", "title": "Buffaloes foe", "description": "Manure fraction to other uses in extensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+
+        {
+            "name": "pigs_fgi", "type": "number", "title": "Pigs fgi", "description": "Manure fraction to grazing/land in intensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "pigs_fge", "type": "number", "title": "Pigs fge", "description": "Manure fraction to grazing/land in extensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "pigs_foi", "type": "number", "title": "Pigs foi", "description": "Manure fraction to other uses in intensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "pigs_foe", "type": "number", "title": "Pigs foe", "description": "Manure fraction to other uses in extensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+
+        {
+            "name": "poultry_fgi", "type": "number", "title": "Poultry fgi", "description": "Manure fraction to grazing/land in intensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "poultry_fge", "type": "number", "title": "Poultry fge", "description": "Manure fraction to grazing/land in extensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "poultry_foi", "type": "number", "title": "Poultry foi", "description": "Manure fraction to other uses in intensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "poultry_foe", "type": "number", "title": "Poultry foe", "description": "Manure fraction to other uses in extensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+
+        {
+            "name": "sheep_fgi", "type": "number", "title": "Sheep fgi", "description": "Manure fraction to grazing/land in intensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "sheep_fge", "type": "number", "title": "Sheep fge", "description": "Manure fraction to grazing/land in extensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "sheep_foi", "type": "number", "title": "Sheep foi", "description": "Manure fraction to other uses in intensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "sheep_foe", "type": "number", "title": "Sheep foe", "description": "Manure fraction to other uses in extensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+
+        {
+            "name": "goats_fgi", "type": "number", "title": "Goats fgi", "description": "Manure fraction to grazing/land in intensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "goats_fge", "type": "number", "title": "Goats fge", "description": "Manure fraction to grazing/land in extensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "goats_foi", "type": "number", "title": "Goats foi", "description": "Manure fraction to other uses in intensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "goats_foe", "type": "number", "title": "Goats foe", "description": "Manure fraction to other uses in extensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+
+        {
+            "name": "horses_fgi", "type": "number", "title": "Horses fgi", "description": "Manure fraction to grazing/land in intensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "horses_fge", "type": "number", "title": "Horses fge", "description": "Manure fraction to grazing/land in extensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "horses_foi", "type": "number", "title": "Horses foi", "description": "Manure fraction to other uses in intensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "horses_foe", "type": "number", "title": "Horses foe", "description": "Manure fraction to other uses in extensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+
+        {
+            "name": "asses_fgi", "type": "number", "title": "Asses fgi", "description": "Manure fraction to grazing/land in intensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "asses_fge", "type": "number", "title": "Asses fge", "description": "Manure fraction to grazing/land in extensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "asses_foi", "type": "number", "title": "Asses foi", "description": "Manure fraction to other uses in intensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "asses_foe", "type": "number", "title": "Asses foe", "description": "Manure fraction to other uses in extensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+
+        {
+            "name": "mules_fgi", "type": "number", "title": "Mules fgi", "description": "Manure fraction to grazing/land in intensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "mules_fge", "type": "number", "title": "Mules fge", "description": "Manure fraction to grazing/land in extensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "mules_foi", "type": "number", "title": "Mules foi", "description": "Manure fraction to other uses in intensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "mules_foe", "type": "number", "title": "Mules foe", "description": "Manure fraction to other uses in extensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+
+        {
+            "name": "camels_fgi", "type": "number", "title": "Camels fgi", "description": "Manure fraction to grazing/land in intensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "camels_fge", "type": "number", "title": "Camels fge", "description": "Manure fraction to grazing/land in extensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "camels_foi", "type": "number", "title": "Camels foi", "description": "Manure fraction to other uses in intensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        },
+        {
+            "name": "camels_foe", "type": "number", "title": "Camels foe", "description": "Manure fraction to other uses in extensive systems.", "float_number": true, "constraints": {"minimum": 0, "maximum": 1}
+        }
+    ],
+    "missingValues": ["", "N/A", "NA", "n/a"],
+    "foreignKeys": [
+        {
+            "fields": "gid",
+            "reference": {
+                "resource": "population",
+                "fields": "gid"
+            }
+        }
+    ]
+}

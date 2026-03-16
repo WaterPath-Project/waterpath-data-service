@@ -12,6 +12,11 @@ from waterpath_data_service.services.projections import (
     fetch_treatment_fractions_csv,
     fetch_assumptions,
 )
+from waterpath_data_service.services.temperature import (
+    generate_temperature_tif,
+    _baseline_temperature_path,
+)
+from waterpath_data_service.services.livestock import generate_livestock_tabular_inputs
 from fastapi import APIRouter, HTTPException, UploadFile, File, Query
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
@@ -28,6 +33,12 @@ _DATA_DIR: Path = settings.data_dir
 _STATIC_DIR: Path = Path(__file__).parent.parent.parent.parent / "static"
 
 schemas = ["population", "sanitation", "treatment"]
+livestock_schema_files = [
+    "livestock_production_systems.json",
+    "livestock_manure_fractions.json",
+    "livestock_manure_management.json",
+    "livestock_isodata.json",
+]
 
 population_cols = {
     "name": "subarea",
@@ -157,6 +168,15 @@ async def download_input_data(session_id: str, file_id: str | None = None):
                     for item in human_emissions_dir.iterdir():
                         if item.is_file() and item.suffix in (".csv", ".tif") and item.name not in _excluded:
                             zipf.write(item, arcname=f"human_emissions/{item.name}")
+
+                    # Add livestock_emissions/ folder if present
+                    livestock_emissions_dir = default_dir / "livestock_emissions"
+                    if livestock_emissions_dir.is_dir():
+                        zipf.writestr(zipfile.ZipInfo("livestock_emissions/"), "")
+                        for item in livestock_emissions_dir.rglob("*"):
+                            if item.is_file():
+                                rel = item.relative_to(livestock_emissions_dir).as_posix()
+                                zipf.write(item, arcname=f"livestock_emissions/{rel}")
 
                 zip_buffer.seek(0)
 
@@ -623,7 +643,7 @@ async def download_projection(
 
 
 @router.post("/input/generate")
-async def generate_input_data_package(session_id: str, gids: str):
+async def generate_input_data_package(session_id: str, gids: str, include_livestock: bool = False):
     areas = [x.strip() for x in gids.split(",") if x.strip()]
 
     session_dir = _DATA_DIR / session_id
@@ -728,7 +748,7 @@ async def generate_input_data_package(session_id: str, gids: str):
             # Uses the 2025 SSP3 1 km raster as the baseline population surface.
             geodata_shp = session_dir / default_path / "geodata" / "geodata.shp"
             isodata_csv = human_emissions_output_path / "population.csv"
-            pop_raster = _STATIC_DIR / "data" / "global_pop_2025_CN_1km_R2025A_UA_v1.tif"
+            pop_raster = _STATIC_DIR / "data" / "worldpop_2025" / "global_pop_2025_CN_1km_R2025A_UA_v1.tif"
 
             if geodata_shp.is_file() and isodata_csv.is_file() and pop_raster.is_file():
                 try:
@@ -743,6 +763,33 @@ async def generate_input_data_package(session_id: str, gids: str):
                     logger.warning(
                         "prepare_spatial_inputs failed for session %s: %s", session_id, spatial_err
                     )
+
+            # Clip baseline temperature raster to the study area.
+            if geodata_shp.is_file():
+                try:
+                    _baseline_temp = _baseline_temperature_path(_STATIC_DIR / "data")
+                    _template_raster = human_emissions_output_path / "isoraster.tif"
+                    generate_temperature_tif(
+                        shapefile_path=geodata_shp,
+                        source_raster_path=_baseline_temp,
+                        out_dir=session_dir / default_path / "livestock_emissions",
+                        template_raster_path=_template_raster if _template_raster.is_file() else None,
+                    )
+                except FileNotFoundError:
+                    pass  # vic_watch ASC not present — skip silently
+                except Exception as _temp_err:
+                    logger.warning(
+                        "Baseline temperature clip failed for session %s: %s",
+                        session_id, _temp_err,
+                    )
+
+            if include_livestock:
+                os.makedirs(session_dir / schemas_path, exist_ok=True)
+                for schema_name in livestock_schema_files:
+                    src = _STATIC_DIR / schemas_path / schema_name
+                    dst = session_dir / schemas_path / schema_name
+                    if src.is_file() and not dst.is_file():
+                        shutil.copyfile(src, dst)
 
         except Exception as e:
             import traceback
@@ -760,7 +807,47 @@ async def generate_input_data_package(session_id: str, gids: str):
     if summary_path.is_file():
         with open(summary_path) as sf:
             d["summary"] = json.load(sf)
+    if include_livestock:
+        try:
+            d["livestock"] = generate_livestock_tabular_inputs(
+                session_dir=session_dir,
+                static_data_dir=_STATIC_DIR / "data",
+            )
+        except Exception as livestock_err:
+            d["livestock"] = {
+                "status": "failed",
+                "error": str(livestock_err),
+            }
     return d
+
+
+@router.post("/input/generate/livestock")
+async def generate_livestock_input_data(session_id: str):
+    session_dir = _DATA_DIR / session_id
+    if not session_dir.is_dir():
+        raise HTTPException(status_code=500, detail="Invalid Session ID provided.")
+
+    try:
+        result = generate_livestock_tabular_inputs(
+            session_dir=session_dir,
+            static_data_dir=_STATIC_DIR / "data",
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to generate livestock tabular inputs: {exc}")
+
+    schemas_path = "schemas/"
+    os.makedirs(session_dir / schemas_path, exist_ok=True)
+    for schema_name in livestock_schema_files:
+        src = _STATIC_DIR / schemas_path / schema_name
+        dst = session_dir / schemas_path / schema_name
+        if src.is_file() and not dst.is_file():
+            shutil.copyfile(src, dst)
+
+    return {
+        "session_id": session_id,
+        "status": "written",
+        "livestock": result,
+    }
 
 
 @router.get("/input/validate")

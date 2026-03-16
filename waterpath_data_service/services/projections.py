@@ -316,7 +316,7 @@ def _population_tif_path(static_data_dir: Path, ssp: str, year: int) -> Path:
         raise ValueError("SSP must look like 'SSP1'..'SSP5'.")
 
     tif_name = f"FuturePop_{ssp_upper}_{year}_1km_v0_2.tif"
-    tif_path = static_data_dir / tif_name
+    tif_path = static_data_dir / "worldpop_2025" / tif_name
     if not tif_path.is_file():
         raise FileNotFoundError(
             f"Population TIF not found: {tif_path}. "
