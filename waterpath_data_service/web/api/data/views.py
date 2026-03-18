@@ -10,6 +10,7 @@ from waterpath_data_service.services.projections import (
     update_human_emissions_population,
     update_isodata_projected_variables,
     fetch_treatment_fractions_csv,
+    fetch_sanitation_projection,
     fetch_assumptions,
 )
 from waterpath_data_service.services.temperature import (
@@ -220,7 +221,7 @@ async def generate_projection_data(
     session_id: str,
     schema: str = Query(
         ...,
-        description="Which schema to generate projections for (population, sanitation, treatment)",
+        description="Which schema to generate projections for (population, sanitation, treatment, all)",
         examples=["population"],
     ),
     year: int = Query(..., description="Projection year", examples=[2025, 2030, 2050, 2100]),
@@ -229,7 +230,7 @@ async def generate_projection_data(
     """Generate projected data for a given schema, year, and SSP scenario."""
 
     schema_norm = schema.strip().lower()
-    allowed_schema = {"population", "sanitation", "treatment"}
+    allowed_schema = {"population", "sanitation", "treatment", "all"}
     if schema_norm not in allowed_schema:
         raise HTTPException(
             status_code=422,
@@ -280,93 +281,124 @@ async def generate_projection_data(
         except Exception:
             pass
 
-    if schema_norm == "population":
-        out_tif = generate_population_isoraster(
-            session_dir=session_dir,
-            scenario_dir=scenario_dir,
-            static_data_dir=static_data_dir,
-            ssp=ssp_norm,
-            year=year,
-        )
+    schemas_to_generate = ["population", "sanitation", "treatment"] if schema_norm == "all" else [schema_norm]
+    schema_results: list[dict] = []
 
-        # Update human_emissions.csv with population values calculated from isoraster.tif
-        shapefile_path = session_dir / "baseline" / "geodata" / "geodata.shp"
-        if not shapefile_path.is_file():
-            shapefile_path = session_dir / "geodata" / "geodata.shp"
+    for _schema in schemas_to_generate:
+        if _schema == "population":
+            out_tif = generate_population_isoraster(
+                session_dir=session_dir,
+                scenario_dir=scenario_dir,
+                static_data_dir=static_data_dir,
+                ssp=ssp_norm,
+                year=year,
+            )
 
-        update_human_emissions_population(
-            human_emissions_path=scenario_human_emissions_path,
-            isoraster_path=out_tif,
-            scenario_dir=scenario_dir,
-            shapefile_path=shapefile_path,
-        )
+            shapefile_path = session_dir / "baseline" / "geodata" / "geodata.shp"
+            if not shapefile_path.is_file():
+                shapefile_path = session_dir / "geodata" / "geodata.shp"
 
-        # Update fraction_urban_pop, fraction_pop_under5, and hdi
-        assumptions = await update_isodata_projected_variables(
-            isodata_path=scenario_human_emissions_path,
-            ssp=ssp_norm,
-            year=year,
-            is_country_level=_is_country_level,
-        )
+            update_human_emissions_population(
+                human_emissions_path=scenario_human_emissions_path,
+                isoraster_path=out_tif,
+                scenario_dir=scenario_dir,
+                shapefile_path=shapefile_path,
+            )
 
+            assumptions = await update_isodata_projected_variables(
+                isodata_path=scenario_human_emissions_path,
+                ssp=ssp_norm,
+                year=year,
+                is_country_level=_is_country_level,
+            )
+            schema_results.append({
+                "schema": "population",
+                "isoraster_tif": str(out_tif),
+                "assumptions": assumptions,
+            })
+
+        elif _schema == "sanitation":
+            try:
+                _iso_df = pd.read_csv(scenario_human_emissions_path)
+                _gid_col = next((c for c in ["gid", "alpha3", "iso_country"] if c in _iso_df.columns), None)
+                if _gid_col is None:
+                    raise ValueError("No GID column found in isodata.csv.")
+                _alpha3_list = _iso_df[_gid_col].astype(str).str[:3].unique().tolist()
+
+                san_proj_df = await fetch_sanitation_projection(_alpha3_list, ssp_norm, year)
+
+                # Sanitation future data is keyed by alpha3.  For sub-national rows the
+                # parent country is in iso_country; for country-level rows gid IS alpha3.
+                _join_src = "iso_country" if "iso_country" in _iso_df.columns else _gid_col
+                _iso_df["_alpha3_join"] = _iso_df[_join_src].astype(str).str[:3]
+                _san_map = san_proj_df.set_index("alpha3")
+                for col in _san_map.columns:
+                    col_map = _san_map[col].to_dict()
+                    updated = _iso_df["_alpha3_join"].map(col_map)
+                    if col in _iso_df.columns:
+                        _iso_df[col] = updated.combine_first(_iso_df[col])
+                    else:
+                        _iso_df[col] = updated
+                _iso_df = _iso_df.drop(columns=["_alpha3_join"])
+                _iso_df.to_csv(scenario_human_emissions_path, index=False)
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail=f"Failed to generate sanitation projection: {exc}")
+
+            assumptions = await fetch_assumptions(["sanitation"])
+            schema_results.append({
+                "schema": "sanitation",
+                "assumptions": assumptions,
+            })
+
+        elif _schema == "treatment":
+            try:
+                _iso_df = pd.read_csv(scenario_human_emissions_path)
+                _gid_col = next((c for c in ["gid", "alpha3", "iso_country"] if c in _iso_df.columns), None)
+                if _gid_col is None:
+                    raise ValueError("No GID column found in isodata.csv.")
+                _alpha3_list = _iso_df[_gid_col].astype(str).str[:3].unique().tolist()
+                treatment_df = await fetch_treatment_fractions_csv(_alpha3_list)
+                treatment_df = treatment_df.rename(columns={"alpha3": "gid"})
+                out_csv = scenario_dir / "treatment.csv"
+                treatment_df.to_csv(out_csv, index=False)
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail=f"Failed to generate treatment projection: {exc}")
+
+            assumptions = await fetch_assumptions(["treatment_fractions"])
+            schema_results.append({
+                "schema": "treatment",
+                "projected_csv": str(out_csv),
+                "assumptions": assumptions,
+            })
+
+    # Write summary.json to the scenario directory.
+    summary_data = {
+        "session_id": session_id,
+        "ssp": ssp_norm,
+        "year": year,
+        "schemas": schema_results,
+    }
+    with open(scenario_dir / "summary.json", "w", encoding="utf-8") as sf:
+        json.dump(summary_data, sf, indent=2)
+
+    if schema_norm == "all":
         return {
             "session_id": session_id,
-            "schema": schema_norm,
             "year": year,
             "ssp": ssp_norm,
             "scenario_isodata_csv": str(scenario_human_emissions_path),
-            "isoraster_tif": str(out_tif),
             "status": "written",
-            "assumptions": assumptions,
+            "schemas": schema_results,
         }
 
-    if schema_norm == "treatment":
-        # Fetch treatment fractions for the session areas from GitHub.
-        try:
-            _iso_df = pd.read_csv(scenario_human_emissions_path)
-            _gid_col = next((c for c in ["gid", "alpha3", "iso_country"] if c in _iso_df.columns), None)
-            if _gid_col is None:
-                raise ValueError("No GID column found in isodata.csv.")
-            _alpha3_list = _iso_df[_gid_col].astype(str).str[:3].unique().tolist()
-            treatment_df = await fetch_treatment_fractions_csv(_alpha3_list)
-            # Rename alpha3 -> gid to match schema convention.
-            treatment_df = treatment_df.rename(columns={"alpha3": "gid"})
-            out_csv = scenario_dir / "treatment.csv"
-            treatment_df.to_csv(out_csv, index=False)
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Failed to generate treatment projection: {exc}")
-
-        assumptions = await fetch_assumptions(["treatment_fractions"])
-
-        return {
-            "session_id": session_id,
-            "schema": schema_norm,
-            "year": year,
-            "ssp": ssp_norm,
-            "scenario_isodata_csv": str(scenario_human_emissions_path),
-            "projected_csv": str(out_csv),
-            "status": "written",
-            "assumptions": assumptions,
-        }
-
-    # Sanitation: copy baseline CSV into the scenario folder.
-    try:
-        out_csv = generate_baseline_csv_projection(
-            session_dir=session_dir,
-            schema=schema_norm,
-            scenario_dir=scenario_dir,
-        )
-    except (FileNotFoundError, ValueError) as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
-
+    result = schema_results[0]
     return {
         "session_id": session_id,
-        "schema": schema_norm,
         "year": year,
         "ssp": ssp_norm,
         "scenario_isodata_csv": str(scenario_human_emissions_path),
-        "projected_csv": str(out_csv),
         "status": "written",
+        **result,
     }
 
 
@@ -453,7 +485,7 @@ async def validate_projection_population(
 async def download_projection(
     schema: str = Query(
         ...,
-        description="Which schema to project (population, sanitation, treatment)",
+        description="Which schema to project (population, sanitation, treatment, all)",
         examples=["population"],
     ),
     year: int = Query(..., description="Projection year", examples=[2025, 2030, 2050, 2100]),
@@ -463,19 +495,20 @@ async def download_projection(
     """Generate a projected scenario from an uploaded baseline CSV.
 
     Returns an in-memory zip archive containing:
-    - ``isodata.csv``       – updated with projected population values
-    - ``isoraster.tif``     – zone-index raster clipped to the study area  (population only)
-    - ``pop_urban.tif``     – projected urban population raster             (population only)
-    - ``pop_rural.tif``     – projected rural population raster             (population only)
-    - ``summary.json``      – per-area and aggregate statistics
+    - ``isodata.csv``       – updated with projected values for all requested schemas
+    - ``treatment.csv``     – projected treatment fractions             (treatment / all only)
+    - ``isoraster.tif``     – zone-index raster clipped to the study area  (population / all only)
+    - ``pop_urban.tif``     – projected urban population raster             (population / all only)
+    - ``pop_rural.tif``     – projected rural population raster             (population / all only)
+    - ``summary.json``      – per-area statistics and assumptions
 
     No data is stored on the server.
     """
     import tempfile
 
     schema_norm = schema.strip().lower()
-    if schema_norm not in {"population", "sanitation", "treatment"}:
-        raise HTTPException(status_code=422, detail=f"Invalid schema. Allowed: population, sanitation, treatment")
+    if schema_norm not in {"population", "sanitation", "treatment", "all"}:
+        raise HTTPException(status_code=422, detail="Invalid schema. Allowed: population, sanitation, treatment, all")
 
     allowed_years = {2025, 2030, 2050, 2100}
     if year not in allowed_years:
@@ -521,13 +554,15 @@ async def download_projection(
         projected_csv_path = scenario_dir / "isodata.csv"
         shutil.copyfile(baseline_csv_path, projected_csv_path)
 
-        summary: dict = {}
-        assumptions: list = []
+        all_assumptions: list = []
+        schema_entries: list = []
 
         # Detect admin level: 3-char gids are country codes; longer gids are sub-national.
         is_country_level = all(len(str(g)) <= 3 for g in gids_list)
+        alpha3_list = [str(g)[:3] for g in gids_list]
+        schemas_to_generate = ["population", "sanitation", "treatment"] if schema_norm == "all" else [schema_norm]
 
-        if schema_norm == "population":
+        if "population" in schemas_to_generate:
             from waterpath_data_service.services.projections import (
                 _population_tif_path,
             )
@@ -558,78 +593,101 @@ async def download_projection(
             except Exception as exc:
                 raise HTTPException(status_code=500, detail=f"Population update failed: {exc}")
 
-            # Update fraction_urban_pop, fraction_pop_under5, and hdi.
             try:
-                assumptions = await update_isodata_projected_variables(
+                pop_assumptions = await update_isodata_projected_variables(
                     isodata_path=projected_csv_path,
                     ssp=ssp_norm,
                     year=year,
                     is_country_level=is_country_level,
                 )
+                all_assumptions.extend(pop_assumptions)
             except Exception as exc:
                 logger.warning("update_isodata_projected_variables failed: %s", exc)
 
-        elif schema_norm == "treatment":
-            # Fetch treatment fractions for the uploaded areas from GitHub.
-            alpha3_list = [str(g)[:3] for g in gids_list]
+        if "sanitation" in schemas_to_generate:
+            try:
+                san_proj_df = await fetch_sanitation_projection(alpha3_list, ssp_norm, year)
+                _san_df = pd.read_csv(projected_csv_path)
+                _join_src = "iso_country" if "iso_country" in _san_df.columns else gid_col
+                _san_df["_alpha3_join"] = _san_df[_join_src].astype(str).str[:3]
+                _san_map = san_proj_df.set_index("alpha3")
+                for col in _san_map.columns:
+                    col_map = _san_map[col].to_dict()
+                    updated = _san_df["_alpha3_join"].map(col_map)
+                    if col in _san_df.columns:
+                        _san_df[col] = updated.combine_first(_san_df[col])
+                    else:
+                        _san_df[col] = updated
+                _san_df = _san_df.drop(columns=["_alpha3_join"])
+                _san_df.to_csv(projected_csv_path, index=False)
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail=f"Failed to fetch sanitation projection: {exc}")
+            san_assumptions = await fetch_assumptions(["sanitation"])
+            all_assumptions.extend(san_assumptions)
+
+        if "treatment" in schemas_to_generate:
             try:
                 treatment_df = await fetch_treatment_fractions_csv(alpha3_list)
                 treatment_df = treatment_df.rename(columns={"alpha3": "gid"})
-                treatment_df.to_csv(projected_csv_path, index=False)
+                treatment_csv_path = scenario_dir / "treatment.csv"
+                treatment_df.to_csv(treatment_csv_path, index=False)
             except Exception as exc:
                 raise HTTPException(status_code=500, detail=f"Failed to fetch treatment fractions: {exc}")
-            assumptions = await fetch_assumptions(["treatment_fractions"])
+            treat_assumptions = await fetch_assumptions(["treatment_fractions"])
+            all_assumptions.extend(treat_assumptions)
 
-        # Compute per-area and aggregate statistics (population schema only).
+        # Compute per-area statistics.
         projected_df = pd.read_csv(projected_csv_path)
-        if schema_norm == "population" and "population" in projected_df.columns and "population" in baseline_df.columns:
-            merged_stats = pd.merge(
-                baseline_df[[gid_col, "population"]],
-                projected_df[[gid_col, "population"]],
-                on=gid_col,
-                suffixes=("_baseline", "_projected"),
-            )
-            merged_stats["diff"] = merged_stats["population_projected"] - merged_stats["population_baseline"]
-            merged_stats["pct_change"] = (
-                (merged_stats["diff"] / merged_stats["population_baseline"].replace(0, float("nan"))) * 100
-            ).round(2)
-
-            area_rows = merged_stats.rename(columns={gid_col: "gid"}).to_dict(orient="records")
-            total_baseline = int(merged_stats["population_baseline"].sum())
-            total_projected = int(merged_stats["population_projected"].sum())
-            total_diff = total_projected - total_baseline
-            _schema_entry = {
-                "schema": schema_norm,
-                "ssp": ssp_norm,
-                "year": year,
-                "total_baseline_population": total_baseline,
-                "total_projected_population": total_projected,
-                "total_diff": total_diff,
-                "total_pct_change": round((total_diff / total_baseline * 100) if total_baseline else 0, 2),
-                "n_areas": len(area_rows),
-                "areas": area_rows,
-                "assumptions": assumptions,
-            }
-        else:
-            _schema_entry = {
-                "schema": schema_norm,
-                "ssp": ssp_norm,
-                "year": year,
-                "n_areas": len(projected_df),
-                "assumptions": assumptions,
-            }
-        summary = {"schemas": [_schema_entry]}
+        for _schema in schemas_to_generate:
+            if _schema == "population" and "population" in projected_df.columns and "population" in baseline_df.columns:
+                merged_stats = pd.merge(
+                    baseline_df[[gid_col, "population"]],
+                    projected_df[[gid_col, "population"]],
+                    on=gid_col,
+                    suffixes=("_baseline", "_projected"),
+                )
+                merged_stats["diff"] = merged_stats["population_projected"] - merged_stats["population_baseline"]
+                merged_stats["pct_change"] = (
+                    (merged_stats["diff"] / merged_stats["population_baseline"].replace(0, float("nan"))) * 100
+                ).round(2)
+                area_rows = merged_stats.rename(columns={gid_col: "gid"}).to_dict(orient="records")
+                total_baseline = int(merged_stats["population_baseline"].sum())
+                total_projected = int(merged_stats["population_projected"].sum())
+                total_diff = total_projected - total_baseline
+                schema_entries.append({
+                    "schema": "population",
+                    "ssp": ssp_norm,
+                    "year": year,
+                    "total_baseline_population": total_baseline,
+                    "total_projected_population": total_projected,
+                    "total_diff": total_diff,
+                    "total_pct_change": round((total_diff / total_baseline * 100) if total_baseline else 0, 2),
+                    "n_areas": len(area_rows),
+                    "areas": area_rows,
+                })
+            else:
+                schema_entries.append({
+                    "schema": _schema,
+                    "ssp": ssp_norm,
+                    "year": year,
+                    "n_areas": len(projected_df),
+                })
+        summary = {"schemas": schema_entries, "assumptions": all_assumptions}
 
         # Build the zip entirely in memory.
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
             zipf.write(projected_csv_path, arcname="isodata.csv")
             zipf.writestr("summary.json", json.dumps(summary, indent=2))
-            # Add rasters produced by prepare_spatial_inputs (population schema only).
+            # Add rasters produced by prepare_spatial_inputs (population / all).
             for tif_name in ("isoraster.tif", "pop_urban.tif", "pop_rural.tif"):
                 tif_file = scenario_dir / tif_name
                 if tif_file.is_file():
                     zipf.write(tif_file, arcname=tif_name)
+            # Add treatment.csv if present.
+            treatment_csv = scenario_dir / "treatment.csv"
+            if treatment_csv.is_file():
+                zipf.write(treatment_csv, arcname="treatment.csv")
 
         zip_buffer.seek(0)
 

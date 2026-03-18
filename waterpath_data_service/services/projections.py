@@ -35,6 +35,10 @@ TREATMENT_FRACTIONS_URL = (
     "https://raw.githubusercontent.com/WaterPath-Project/waterpath-data"
     "/refs/heads/main/treatment_fractions/data/treatment.csv"
 )
+_SANITATION_FUTURE_URL = (
+    "https://raw.githubusercontent.com/WaterPath-Project/waterpath-data"
+    "/refs/heads/main/jmp_household_surveys/data/sanitation_combined_future.csv"
+)
 
 _ASSUMPTIONS_URLS: dict[str, str] = {
     "urbanization": (
@@ -52,6 +56,10 @@ _ASSUMPTIONS_URLS: dict[str, str] = {
     "treatment_fractions": (
         "https://raw.githubusercontent.com/WaterPath-Project/waterpath-data"
         "/refs/heads/main/treatment_fractions/data/assumptions.csv"
+    ),
+    "sanitation": (
+        "https://raw.githubusercontent.com/WaterPath-Project/waterpath-data"
+        "/refs/heads/main/jmp_household_surveys/data/assumptions.csv"
     ),
 }
 
@@ -74,6 +82,49 @@ async def fetch_treatment_fractions_csv(alpha3_list: list[str]) -> pd.DataFrame:
         r.raise_for_status()
     df = pd.read_csv(io.StringIO(r.text))
     return df[df["alpha3"].isin(alpha3_list)].copy()
+
+
+async def fetch_sanitation_projection(
+    alpha3_list: list[str],
+    ssp: str,
+    year: int,
+) -> pd.DataFrame:
+    """Fetch projected sanitation fractions for the given countries, SSP, and year.
+
+    Source: ``sanitation_combined_future.csv``
+
+    Returns a DataFrame filtered to *alpha3_list*, *ssp*, and *year* with the
+    scenario and year columns dropped.  The result contains ``alpha3`` plus all
+    sanitation fraction columns from the source file.
+    """
+    async with httpx.AsyncClient() as client:
+        r = await client.get(_SANITATION_FUTURE_URL, timeout=30)
+        r.raise_for_status()
+    df = pd.read_csv(io.StringIO(r.text))
+
+    alpha3_col = next((c for c in df.columns if c.lower() == "alpha3"), None)
+    scenario_col = next((c for c in df.columns if c.lower() in ("scenario", "ssp")), None)
+    year_col = next((c for c in df.columns if c.lower() == "year"), None)
+
+    if alpha3_col is None or scenario_col is None or year_col is None:
+        raise ValueError(
+            "sanitation_combined_future.csv is missing expected columns "
+            "(alpha3, scenario/ssp, year). "
+            f"Found: {df.columns.tolist()}"
+        )
+
+    ssp_norm = ssp.strip().upper()
+    df[year_col] = pd.to_numeric(df[year_col], errors="coerce")
+
+    mask = (
+        df[alpha3_col].isin(alpha3_list)
+        & (df[scenario_col].astype(str).str.strip().str.upper() == ssp_norm)
+        & (df[year_col] == year)
+    )
+    result = df[mask].drop(columns=[scenario_col, year_col]).copy()
+    if alpha3_col != "alpha3":
+        result = result.rename(columns={alpha3_col: "alpha3"})
+    return result
 
 
 async def fetch_urbanization_level0_projection(

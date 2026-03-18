@@ -63,7 +63,7 @@ as the source.
 
 ### Step 3 — Snap to a standard value
 
-`raw` is snapped to the nearest entry in a fixed list of "nice" resolutions:
+`raw` is snapped to the nearest entry in a fixed list of acceptable resolutions:
 
 ```
 [0.001°, 0.002°, 0.005°, 0.01°, 0.025°, 0.05°, 0.1°, 0.25°, 0.5°]

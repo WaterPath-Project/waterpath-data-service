@@ -28,6 +28,15 @@ _IPCC_ORDER = [
 
 _NICE_RESOLUTIONS = [0.001, 0.002, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5]
 
+_FAOSTAT_STOCKS_CSV_URL = (
+    "https://raw.githubusercontent.com/WaterPath-Project/waterpath-data/"
+    "refs/heads/main/faostat_stocks/data/FAOSTAT_data.csv"
+)
+_FAOSTAT_COUNTRY_GROUPS_CSV_URL = (
+    "https://raw.githubusercontent.com/WaterPath-Project/waterpath-data/"
+    "refs/heads/main/faostat_stocks/data/FAOSTAT_country_groups.csv"
+)
+
 
 def _native_tif_resolution(raster_path: Path) -> float:
     with rasterio.open(raster_path) as src:
@@ -174,6 +183,15 @@ def _clip_raster_to_zone_grid(
     with rasterio.open(source_raster) as src:
         src_arr = src.read(1).astype(np.float32)
         nd = source_nodata if source_nodata is not None else src.nodata
+        # If the file has no nodata metadata but stores sentinel values such as
+        # -9999, treat any negative pixel as nodata so bilinear resampling does
+        # not bleed those sentinels into valid cells.
+        if nd is None:
+            src_arr = np.where(src_arr < 0, np.nan, src_arr)
+            nd = np.nan
+        else:
+            src_arr = np.where(src_arr == nd, np.nan, src_arr)
+            nd = np.nan
         reproject(
             source=src_arr,
             destination=dst,
@@ -185,6 +203,9 @@ def _clip_raster_to_zone_grid(
             dst_nodata=np.nan,
             resampling=Resampling.bilinear,
         )
+    # Bilinear interpolation at nodata boundaries can still produce small
+    # negative artefacts; clamp them because animal head counts must be >= 0.
+    dst = np.where(dst < 0, np.nan, dst)
     return dst
 
 
@@ -341,10 +362,9 @@ def _generate_manure_management(
     mapping: pd.DataFrame,
 ) -> Path:
     mm_csv = static_data_dir / "vermeulen_2017" / "manure_management_systems.csv"
-    country_groups_csv = static_data_dir / "faostat_2024" / "FAOSTAT_country_groups_2024.csv"
 
     src = pd.read_csv(mm_csv, encoding="latin-1")
-    groups = pd.read_csv(country_groups_csv)
+    groups = pd.read_csv(_FAOSTAT_COUNTRY_GROUPS_CSV_URL)
 
     groups["M49 Code"] = pd.to_numeric(groups["M49 Code"], errors="coerce")
     groups = groups.dropna(subset=["M49 Code", "ISO3 Code"]).copy()
@@ -439,7 +459,7 @@ def _generate_animal_isodata(
     return created
 
 
-def _build_m49_to_ipcc_region(country_groups_csv: Path) -> dict[int, int]:
+def _build_m49_to_ipcc_region(country_groups_csv: str | Path) -> dict[int, int]:
     """
     Build a mapping from M49 country code → IPCC livestock region integer ID.
 
@@ -488,10 +508,9 @@ def _build_ipcc_region_array(
     valid_mask: np.ndarray,
 ) -> tuple[np.ndarray, list[int]]:
     nutdata_raster = static_data_dir / "vermeulen_2017" / "nutdata_2000_iso.tif"
-    country_groups_csv = static_data_dir / "faostat_2024" / "FAOSTAT_country_groups_2024.csv"
 
     m49_arr = _reproject_region_to_zone_grid(nutdata_raster, zone_profile)
-    m49_to_ipcc = _build_m49_to_ipcc_region(country_groups_csv)
+    m49_to_ipcc = _build_m49_to_ipcc_region(_FAOSTAT_COUNTRY_GROUPS_CSV_URL)
     ipcc_arr = np.full_like(m49_arr, np.nan, dtype=np.float32)
     for m49, ipcc_id in m49_to_ipcc.items():
         ipcc_arr[m49_arr == float(m49)] = float(ipcc_id)
@@ -517,13 +536,27 @@ def _generate_animal_isoraster(
     zone_idx: np.ndarray,
     zone_profile: rasterio.profiles.Profile,
     valid_mask: np.ndarray,
-) -> tuple[Path, list[int]]:
-    """Write animal_isoraster.tif using the session geodata grid and return active IPCC region IDs."""
+) -> tuple[Path, list[int], np.ndarray]:
+    """Write animal_isoraster.tif using the session geodata grid.
+
+    Returns (path, active_region_ids, zone_ipcc_arr) so callers can reuse the
+    already-computed per-pixel IPCC region array without re-running it.
+    """
     ipcc_arr, active_region_ids = _build_ipcc_region_array(static_data_dir, zone_idx, zone_profile, valid_mask)
 
     out_path = output_dir / "animal_isoraster.tif"
     _write_float_raster(ipcc_arr, zone_profile, out_path)
-    return out_path, active_region_ids
+    return out_path, active_region_ids, ipcc_arr
+
+
+# IPCC region IDs follow _IPCC_ORDER (1-based): Africa=1, Asia=2, Europe=3,
+# Latin America=4, NENA=5, North America=6, Oceania=7.
+# Proxy species that only occur in specific regions must be masked accordingly
+# so that using a sheep/goat spatial proxy does not produce biologically
+# implausible occurrences (e.g. camels in Europe).
+_PROXY_ALLOWED_IPCC_REGIONS: dict[str, frozenset[int]] = {
+    "camels": frozenset({1, 2, 5}),  # Africa, Asia, NENA
+}
 
 
 def _generate_animal_heads_rasters(
@@ -531,6 +564,7 @@ def _generate_animal_heads_rasters(
     output_dir: Path,
     zone_profile: rasterio.profiles.Profile,
     valid_mask: np.ndarray,
+    zone_ipcc_arr: np.ndarray,
 ) -> dict[str, str]:
     """
     Generate per-animal heads rasters clipped to the session extent.
@@ -539,10 +573,13 @@ def _generate_animal_heads_rasters(
     Ducks are taken from GLW4 2015 and scaled to 2020 using global FAOSTAT totals.
     Horses, donkeys, asses, mules, and camels use a sheep+goat spatial proxy scaled
     by the ratio of each species' FAOSTAT 2020 global total to the combined sheep+goat total.
+    Proxy species listed in ``_PROXY_ALLOWED_IPCC_REGIONS`` are additionally
+    masked to their plausible IPCC regions to avoid artefacts (e.g. camels in
+    Europe due to the sheep/goat proxy).
     """
     glw4_2020_dir = static_data_dir / "glw4_2020"
     glw4_2015_dir = static_data_dir / "glw4_2015"
-    faostat_csv = static_data_dir / "faostat_2024" / "FAOSTAT_data_en_8-13-2024.csv"
+    faostat_csv = _FAOSTAT_STOCKS_CSV_URL
 
     animals_dir = output_dir / "animals"
     animals_dir.mkdir(parents=True, exist_ok=True)
@@ -601,6 +638,13 @@ def _generate_animal_heads_rasters(
         fao_count = _fao_total(fao_item)
         ratio = fao_count / proxy_total if proxy_total > 0 else 0.0
         arr = np.where(np.isfinite(proxy_arr), proxy_arr * ratio, np.nan).astype(np.float32)
+        # Restrict species to their biologically plausible IPCC regions.
+        allowed_regions = _PROXY_ALLOWED_IPCC_REGIONS.get(animal)
+        if allowed_regions is not None:
+            region_ok = np.zeros(zone_ipcc_arr.shape, dtype=bool)
+            for rid in allowed_regions:
+                region_ok |= zone_ipcc_arr == float(rid)
+            arr = np.where(region_ok, arr, np.nan)
         arr[~valid_mask] = np.nan
         out_path = animals_dir / f"{animal}_heads.tif"
         _write_float_raster(arr, zone_profile, out_path)
@@ -639,7 +683,7 @@ def generate_livestock_tabular_inputs(session_dir: Path, static_data_dir: Path) 
         mapping=mapping,
     )
 
-    animal_isoraster, active_region_ids = _generate_animal_isoraster(
+    animal_isoraster, active_region_ids, zone_ipcc_arr = _generate_animal_isoraster(
         static_data_dir=static_data_dir,
         output_dir=output_dir,
         zone_idx=zone_idx,
@@ -656,6 +700,7 @@ def generate_livestock_tabular_inputs(session_dir: Path, static_data_dir: Path) 
         output_dir=output_dir,
         zone_profile=zone_profile,
         valid_mask=valid_mask,
+        zone_ipcc_arr=zone_ipcc_arr,
     )
 
     logger.info("Generated livestock tabular inputs in %s", output_dir)
