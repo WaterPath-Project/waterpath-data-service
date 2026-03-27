@@ -218,6 +218,33 @@ def _write_float_raster(arr: np.ndarray, zone_profile: rasterio.profiles.Profile
         dst.write(arr.astype(np.float32), 1)
 
 
+def _pixel_area_km2(zone_profile: rasterio.profiles.Profile) -> np.ndarray:
+    """Return a 2-D array of pixel areas in km² for the given zone grid.
+
+    GLW4 2020 "D-DA" rasters store *animal density* (heads/km²), not total
+    heads per pixel.  Multiplying by pixel area converts them to total heads
+    per pixel so they are comparable to the GLW4 2015 duck raster (which
+    already stores total heads per pixel).
+
+    Area is computed as::
+
+        area = (res_deg × 111.32 km/°)² × cos(lat)
+    """
+    transform = zone_profile["transform"]
+    height = zone_profile["height"]
+    width = zone_profile["width"]
+    res_deg = abs(transform.a)  # pixel width in degrees (uniform for EPSG:4326)
+    km_per_deg = 111.32
+    pixel_width_km = res_deg * km_per_deg
+
+    # Row-centre latitudes (degrees)
+    lats = np.array([transform.f + (row + 0.5) * transform.e for row in range(height)])
+    cos_lat = np.cos(np.deg2rad(lats))
+    # Shape: (height, 1) → broadcasts to (height, width)
+    area = (pixel_width_km ** 2) * cos_lat[:, np.newaxis]
+    return np.broadcast_to(area, (height, width)).copy().astype(np.float32)
+
+
 def _aggregate_lookup_columns(
     zone_idx: np.ndarray,
     valid_mask: np.ndarray,
@@ -571,7 +598,11 @@ def _generate_animal_heads_rasters(
     Generate per-animal heads rasters clipped to the session extent.
 
     GLW4 2020 rasters cover cattle, buffaloes, chickens, goats, pigs, sheep.
+    These rasters store animal *density* (heads/km²) and are multiplied by
+    pixel area to yield total heads per pixel.
     Ducks are taken from GLW4 2015 and scaled to 2020 using global FAOSTAT totals.
+    The 2015 duck raster already stores total heads per pixel, so no area
+    conversion is needed.
     Horses, donkeys, asses, mules, and camels use a sheep+goat spatial proxy scaled
     by the ratio of each species' FAOSTAT 2020 global total to the combined sheep+goat total.
     Proxy species listed in ``_PROXY_ALLOWED_IPCC_REGIONS`` are additionally
@@ -586,6 +617,10 @@ def _generate_animal_heads_rasters(
     animals_dir.mkdir(parents=True, exist_ok=True)
 
     fao = pd.read_csv(faostat_csv)
+    # Pre-compute pixel area (km²) for the zone grid.  GLW4 2020 D-DA rasters
+    # store animal density (heads/km²); multiplying by pixel area converts to
+    # total heads per pixel, matching the units of the GLW4 2015 duck raster.
+    pixel_area = _pixel_area_km2(zone_profile)
 
     def _fao_total(item_name: str, year: int = 2020) -> float:
         sub = fao[(fao["Year"] == year) & (fao["Item"] == item_name)]
@@ -593,7 +628,7 @@ def _generate_animal_heads_rasters(
 
     created: dict[str, str] = {}
 
-    # GLW4 2020 direct mappings
+    # GLW4 2020 direct mappings (density rasters → multiply by pixel area)
     glw4_direct = {
         "cattle":    "GLW4-2020.D-DA.CTL.tif",
         "buffaloes": "GLW4-2020.D-DA.BFL.tif",
@@ -604,13 +639,14 @@ def _generate_animal_heads_rasters(
     }
     for animal, fname in glw4_direct.items():
         arr = _clip_raster_to_zone_grid(glw4_2020_dir / fname, zone_profile)
+        arr = np.where(np.isfinite(arr), arr * pixel_area, np.nan).astype(np.float32)
         arr[~valid_mask] = np.nan
         out_path = animals_dir / f"{animal}_heads.tif"
         _write_float_raster(arr, zone_profile, out_path)
         created[animal] = str(out_path)
         logger.debug("Written %s", out_path)
 
-    # Ducks: GLW4 2015 scaled to 2020 by global FAOSTAT ratio
+    # Ducks: GLW4 2015 stores total heads/pixel already — only scale 2015→2020
     duck_2015_total = _fao_total("Ducks", 2015)
     duck_2020_total = _fao_total("Ducks", 2020)
     duck_scale = duck_2020_total / duck_2015_total if duck_2015_total > 0 else 1.0
@@ -622,9 +658,14 @@ def _generate_animal_heads_rasters(
     created["ducks"] = str(out_path)
     logger.debug("Written %s", out_path)
 
-    # Proxy species (no GLW4 raster): distribute using SHP+GTS spatial pattern
+    # Proxy species (no GLW4 raster): distribute using SHP+GTS spatial pattern.
+    # sheep/goat density rasters are already pixel-area-converted above; we use
+    # the pre-converted arrays from created[] so the proxy is in heads/pixel too.
     shp_arr = _clip_raster_to_zone_grid(glw4_2020_dir / "GLW4-2020.D-DA.SHP.tif", zone_profile)
     gts_arr = _clip_raster_to_zone_grid(glw4_2020_dir / "GLW4-2020.D-DA.GTS.tif", zone_profile)
+    # Convert density → heads/pixel before building proxy pattern
+    shp_arr = np.where(np.isfinite(shp_arr), shp_arr * pixel_area, np.nan)
+    gts_arr = np.where(np.isfinite(gts_arr), gts_arr * pixel_area, np.nan)
     proxy_arr = np.where(np.isfinite(shp_arr) & np.isfinite(gts_arr), shp_arr + gts_arr, np.nan)
     proxy_total = _fao_total("Sheep") + _fao_total("Goats")
 
