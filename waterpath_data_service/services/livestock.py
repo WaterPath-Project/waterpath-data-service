@@ -1126,6 +1126,20 @@ def generate_livestock_projection_rasters(
         updated_csvs[csv_key] = str(out_csv)
         logger.debug("Updated tabular CSV: %s", out_csv)
 
+    # ---- Static baseline files: copy animal_isoraster.tif and isodata_*.csv ---
+    # These are IPCC region mapping / physiological constants that do not vary
+    # by SSP or year.  They must be present alongside the projected heads TIFs
+    # so downstream tools find a complete livestock_emissions directory.
+    for _static_src in [baseline_livestock_dir / "animal_isoraster.tif"]:
+        if _static_src.is_file():
+            _static_dst = output_dir / _static_src.name
+            if not _static_dst.exists():
+                shutil.copyfile(_static_src, _static_dst)
+    for _isodata_csv in (baseline_livestock_dir / "animals").glob("isodata_*.csv"):
+        _isodata_dst = out_animals_dir / _isodata_csv.name
+        if not _isodata_dst.exists():
+            shutil.copyfile(_isodata_csv, _isodata_dst)
+
     return {
         "output_dir": str(output_dir),
         "animal_heads": created_tifs,

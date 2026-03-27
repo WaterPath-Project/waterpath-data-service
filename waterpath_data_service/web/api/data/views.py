@@ -844,13 +844,19 @@ async def download_projection(
             treatment_csv = scenario_dir / "treatment.csv"
             if treatment_csv.is_file():
                 zipf.write(treatment_csv, arcname="treatment.csv")
-            # Add projected livestock TIFs if present.
-            ls_animals_dir = scenario_dir / "livestock_emissions" / "animals"
+            # Add projected livestock outputs if present.
+            ls_dir = scenario_dir / "livestock_emissions"
+            ls_animals_dir = ls_dir / "animals"
             if ls_animals_dir.is_dir():
-                for tif_file in ls_animals_dir.glob("*_heads.tif"):
+                for tif_file in ls_animals_dir.glob("*.tif"):
                     zipf.write(tif_file, arcname=f"livestock_emissions/animals/{tif_file.name}")
+                for isodata_csv in ls_animals_dir.glob("isodata_*.csv"):
+                    zipf.write(isodata_csv, arcname=f"livestock_emissions/animals/{isodata_csv.name}")
+            ls_isoraster = ls_dir / "animal_isoraster.tif"
+            if ls_isoraster.is_file():
+                zipf.write(ls_isoraster, arcname="livestock_emissions/animal_isoraster.tif")
             for ls_csv in ("manure_fractions.csv", "production_systems.csv", "manure_management.csv"):
-                ls_csv_file = scenario_dir / "livestock_emissions" / ls_csv
+                ls_csv_file = ls_dir / ls_csv
                 if ls_csv_file.is_file():
                     zipf.write(ls_csv_file, arcname=f"livestock_emissions/{ls_csv}")
 
