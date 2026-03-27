@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -30,11 +31,11 @@ _NICE_RESOLUTIONS = [0.001, 0.002, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5]
 
 _FAOSTAT_STOCKS_CSV_URL = (
     "https://raw.githubusercontent.com/WaterPath-Project/waterpath-data/"
-    "refs/heads/main/faostat_stocks/data/FAOSTAT_data.csv"
+    "main/livestock_projections/data/original/FAOSTAT_data.csv"
 )
 _FAOSTAT_COUNTRY_GROUPS_CSV_URL = (
     "https://raw.githubusercontent.com/WaterPath-Project/waterpath-data/"
-    "refs/heads/main/faostat_stocks/data/FAOSTAT_country_groups.csv"
+    "main/livestock_projections/data/original/FAOSTAT_country_groups.csv"
 )
 
 
@@ -712,4 +713,380 @@ def generate_livestock_tabular_inputs(session_dir: Path, static_data_dir: Path) 
         "animal_isodata": animal_isodata,
         "animal_isoraster": str(animal_isoraster),
         "animal_heads": animal_heads,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Livestock projection constants
+# ---------------------------------------------------------------------------
+
+# Animal column names expected in livestock_future.csv that correspond to
+# spatial heads rasters.
+_LIVESTOCK_FUTURE_ANIMAL_COLS: frozenset[str] = frozenset({
+    "cattle", "buffaloes", "pigs", "horses", "mules",
+    "goats", "sheep", "asses", "poultry",
+})
+
+# Mapping: future CSV column name → baseline *_heads.tif filename.
+# "poultry" in the future CSV corresponds to the GLW4 "chickens" raster.
+_ANIMAL_COL_TO_TIF: dict[str, str] = {
+    "cattle":    "cattle_heads.tif",
+    "buffaloes": "buffaloes_heads.tif",
+    "pigs":      "pigs_heads.tif",
+    "horses":    "horses_heads.tif",
+    "mules":     "mules_heads.tif",
+    "goats":     "goats_heads.tif",
+    "sheep":     "sheep_heads.tif",
+    "asses":     "asses_heads.tif",
+    "poultry":   "chickens_heads.tif",
+}
+
+
+# ---------------------------------------------------------------------------
+# Livestock projection helpers
+# ---------------------------------------------------------------------------
+
+def _build_iso_to_alpha3(mapping: pd.DataFrame) -> dict[int, str]:
+    """Return {iso_int: alpha3_str} from the session iso/gid mapping."""
+    return (
+        mapping.drop_duplicates(subset=["iso"], keep="first")
+        .assign(_alpha3=lambda df: df["gid"].astype(str).str[:3])
+        .set_index("iso")["_alpha3"]
+        .to_dict()
+    )
+
+
+def _alpha3_growth_rates(
+    baseline_tif: Path,
+    zone_idx: np.ndarray,
+    valid_mask: np.ndarray,
+    zone_profile: rasterio.profiles.Profile,
+    iso_to_alpha3: dict[int, str],
+    future_df: pd.DataFrame,
+    future_col: str,
+) -> dict[str, float]:
+    """Compute per-alpha3 scale factor = projected_total / baseline_total.
+
+    All zones belonging to the same alpha3 are summed to form the baseline
+    total for that country, and the future CSV value is divided by that sum.
+    Returns ``1.0`` for any alpha3 not found in *future_df* or with zero baseline.
+    """
+    arr = _clip_raster_to_zone_grid(baseline_tif, zone_profile)
+
+    # Aggregate baseline pixel totals per alpha3 (one alpha3 may span multiple zones).
+    alpha3_baseline: dict[str, float] = {}
+    for iso_id in np.unique(zone_idx[valid_mask]):
+        alpha3 = iso_to_alpha3.get(int(iso_id))
+        if alpha3 is None:
+            continue
+        zone_pixels = arr[zone_idx == iso_id]
+        count = float(np.nansum(zone_pixels))
+        alpha3_baseline[alpha3] = alpha3_baseline.get(alpha3, 0.0) + count
+
+    future_col_norm = future_col.lower()
+    # Find the actual column name in future_df (case-insensitive).
+    actual_col = next((c for c in future_df.columns if c.lower() == future_col_norm), None)
+    if actual_col is None:
+        return {a: 1.0 for a in alpha3_baseline}
+
+    future_indexed = future_df.set_index("alpha3")[actual_col]
+
+    rates: dict[str, float] = {}
+    for alpha3, baseline_count in alpha3_baseline.items():
+        if alpha3 not in future_indexed.index or baseline_count <= 0:
+            rates[alpha3] = 1.0
+        else:
+            future_val = pd.to_numeric(future_indexed[alpha3], errors="coerce")
+            rates[alpha3] = float(future_val) / baseline_count if pd.notna(future_val) else 1.0
+    return rates
+
+
+def _scale_and_write_tif(
+    baseline_tif: Path,
+    out_path: Path,
+    zone_idx: np.ndarray,
+    valid_mask: np.ndarray,
+    zone_profile: rasterio.profiles.Profile,
+    iso_to_alpha3: dict[int, str],
+    alpha3_rates: dict[str, float],
+) -> None:
+    """Scale *baseline_tif* pixels per alpha3 footprint and write to *out_path*."""
+    arr = _clip_raster_to_zone_grid(baseline_tif, zone_profile)
+    projected = arr.copy()
+    for iso_id in np.unique(zone_idx[valid_mask]):
+        alpha3 = iso_to_alpha3.get(int(iso_id))
+        if alpha3 is None:
+            continue
+        rate = alpha3_rates.get(alpha3, 1.0)
+        zm = zone_idx == iso_id
+        projected[zm] = np.where(np.isfinite(arr[zm]), arr[zm] * rate, np.nan)
+    projected = np.where(valid_mask, projected, np.nan)
+    _write_float_raster(projected.astype(np.float32), zone_profile, out_path)
+
+
+def _update_tabular_csv_from_future(
+    baseline_csv: Path,
+    out_path: Path,
+    future_df: pd.DataFrame,
+    mapping: pd.DataFrame,
+) -> None:
+    """Update *baseline_csv* rows with matching columns from *future_df*.
+
+    Each row in the baseline CSV is keyed by ``iso`` (or ``gid``).  The
+    corresponding alpha3 is derived from the session iso/gid mapping.  Any
+    column present in both the baseline and *future_df* (case-insensitive
+    match, excluding ``iso``/``gid``) is overwritten with the future value;
+    rows with no match fall back to the baseline value.
+    """
+    baseline = pd.read_csv(baseline_csv)
+    iso_to_alpha3 = _build_iso_to_alpha3(mapping)
+
+    if "alpha3" not in future_df.columns or future_df.empty:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        baseline.to_csv(out_path, index=False)
+        return
+
+    future_indexed = future_df.set_index("alpha3")
+    # Build case-insensitive column lookup for the future DataFrame.
+    future_col_lower = {c.lower(): c for c in future_indexed.columns}
+
+    for idx, row in baseline.iterrows():
+        iso_val = row.get("iso")
+        gid_val = row.get("gid")
+        alpha3 = None
+        if iso_val is not None and pd.notna(iso_val):
+            alpha3 = iso_to_alpha3.get(int(iso_val))
+        if alpha3 is None and gid_val is not None:
+            alpha3 = str(gid_val)[:3]
+        if alpha3 is None or alpha3 not in future_indexed.index:
+            continue
+        future_row = future_indexed.loc[alpha3]
+        for col in baseline.columns:
+            if col in ("iso", "gid"):
+                continue
+            future_col_actual = future_col_lower.get(col.lower())
+            if future_col_actual and pd.notna(future_row.get(future_col_actual)):
+                baseline.at[idx, col] = future_row[future_col_actual]
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    baseline.to_csv(out_path, index=False)
+
+
+# ---------------------------------------------------------------------------
+# Public projection entry-point
+# ---------------------------------------------------------------------------
+
+def generate_livestock_projection_rasters(
+    baseline_livestock_dir: Path,
+    output_dir: Path,
+    livestock_future_df: pd.DataFrame,
+    mapping: pd.DataFrame,
+    zone_idx: np.ndarray,
+    valid_mask: np.ndarray,
+    zone_profile: rasterio.profiles.Profile,
+    tabular_schema_fields: dict[str, set[str]] | None = None,
+    generate_rasters: bool = True,
+    tabular_outputs: set[str] | None = None,
+) -> dict:
+    """Generate projected livestock heads TIFs and update tabular CSVs.
+
+    For each animal column present in *livestock_future_df*, the corresponding
+    baseline ``*_heads.tif`` is scaled per-alpha3 by the ratio
+    ``projected_count / baseline_pixel_sum`` within that country's zones,
+    preserving the existing spatial distribution.
+
+    Ducks use the same per-alpha3 growth rate as poultry (if available).  Their
+    manure fractions are also copied from the poultry columns.
+
+    ``manure_fractions.csv`` and ``manure_management.csv`` are copied
+    unchanged from the baseline (they contain static behavioural parameters
+    that do not vary by SSP or year).  ``production_systems.csv`` is updated
+    with the intensive/extensive split columns from *livestock_future_df*.
+
+    *tabular_schema_fields* is an optional mapping from output CSV stem (e.g.
+    ``"manure_fractions"``, ``"production_systems"``) to the set of field names
+    defined in the corresponding schema JSON.  When provided, the future
+    DataFrame is filtered to only those columns before updating each CSV so that
+    outputs strictly conform to the declared schema.
+
+    *generate_rasters* controls whether animal heads TIFs are written.  Set to
+    ``False`` to update only tabular CSVs without running the raster scaling
+    pipeline.
+
+    *tabular_outputs* is an optional set of CSV stems to write (e.g.
+    ``{"manure_fractions"}``).  ``None`` means write all tabular outputs; an
+    empty set skips all tabular CSV writes.
+
+    Returns a summary dict of written file paths.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_animals_dir = output_dir / "animals"
+    out_animals_dir.mkdir(parents=True, exist_ok=True)
+    baseline_animals_dir = baseline_livestock_dir / "animals"
+
+    iso_to_alpha3 = _build_iso_to_alpha3(mapping)
+
+    present_animal_cols = [
+        c for c in livestock_future_df.columns
+        if c.lower() in _LIVESTOCK_FUTURE_ANIMAL_COLS
+    ]
+
+    created_tifs: dict[str, str] = {}
+    poultry_rates: dict[str, float] | None = None
+    cattle_rates: dict[str, float] | None = None
+
+    if generate_rasters:
+        for col in present_animal_cols:
+            tif_name = _ANIMAL_COL_TO_TIF.get(col.lower())
+            if tif_name is None:
+                continue
+            baseline_tif = baseline_animals_dir / tif_name
+            if not baseline_tif.is_file():
+                logger.warning("Baseline TIF not found: %s — skipping", baseline_tif)
+                continue
+
+            rates = _alpha3_growth_rates(
+                baseline_tif=baseline_tif,
+                zone_idx=zone_idx,
+                valid_mask=valid_mask,
+                zone_profile=zone_profile,
+                iso_to_alpha3=iso_to_alpha3,
+                future_df=livestock_future_df,
+                future_col=col,
+            )
+            out_path = out_animals_dir / tif_name
+            _scale_and_write_tif(
+                baseline_tif=baseline_tif,
+                out_path=out_path,
+                zone_idx=zone_idx,
+                valid_mask=valid_mask,
+                zone_profile=zone_profile,
+                iso_to_alpha3=iso_to_alpha3,
+                alpha3_rates=rates,
+            )
+            created_tifs[col.lower()] = str(out_path)
+            logger.debug("Projected heads written: %s", out_path)
+
+            if col.lower() == "poultry":
+                poultry_rates = rates
+            if col.lower() == "cattle":
+                cattle_rates = rates
+
+        # ---- Ducks TIF: use poultry growth rate --------------------------------
+        duck_tif = baseline_animals_dir / "ducks_heads.tif"
+        if duck_tif.is_file() and poultry_rates is not None:
+            duck_out = out_animals_dir / "ducks_heads.tif"
+            _scale_and_write_tif(
+                baseline_tif=duck_tif,
+                out_path=duck_out,
+                zone_idx=zone_idx,
+                valid_mask=valid_mask,
+                zone_profile=zone_profile,
+                iso_to_alpha3=iso_to_alpha3,
+                alpha3_rates=poultry_rates,
+            )
+            created_tifs["ducks"] = str(duck_out)
+
+    # ---- Duck column propagation (always, for tabular CSV updates) --------------
+    # Propagate poultry_* columns to ducks_* so _update_tabular_csv_from_future
+    # can update duck entries in manure_fractions.csv regardless of whether
+    # animal heads TIFs were generated.
+    poultry_frac_cols = [
+        c for c in livestock_future_df.columns if c.lower().startswith("poultry_")
+    ]
+    for pc in poultry_frac_cols:
+        duck_col = "ducks_" + pc.split("_", 1)[1]
+        if duck_col not in livestock_future_df.columns:
+            livestock_future_df = livestock_future_df.copy()
+            livestock_future_df[duck_col] = livestock_future_df[pc]
+
+    # ---- Meat and dairy: use cattle growth rate / columns when absent ----------
+    # Meat cattle and dairy cattle share the same GLW4 raster and FAO projection
+    # column ("cattle").  When livestock_future.csv does not provide explicit
+    # "meat" or "dairy" head counts (or any "meat_*"/"dairy_*" tabular columns),
+    # we copy the cattle values so that _update_tabular_csv_from_future can
+    # propagate them to the matching "meat_*" / "dairy_*" columns in
+    # production_systems.csv and manure_fractions.csv.
+    cattle_col = next(
+        (c for c in livestock_future_df.columns if c.lower() == "cattle"), None
+    )
+    if cattle_col is not None:
+        cattle_suffix_cols = [
+            c for c in livestock_future_df.columns
+            if c.lower().startswith("cattle_")
+        ]
+        for variant in ("meat", "dairy"):
+            has_variant = any(
+                c.lower() == variant or c.lower().startswith(f"{variant}_")
+                for c in livestock_future_df.columns
+            )
+            if not has_variant:
+                livestock_future_df = livestock_future_df.copy()
+                # Propagate cattle head-count column as a proxy head count.
+                livestock_future_df[variant] = livestock_future_df[cattle_col]
+                # Propagate any cattle_<suffix> columns (e.g. cattle_fgi → meat_fgi).
+                for cc in cattle_suffix_cols:
+                    variant_col = variant + cc[len("cattle"):]
+                    if variant_col not in livestock_future_df.columns:
+                        livestock_future_df[variant_col] = livestock_future_df[cc]
+                logger.debug(
+                    "Propagated 'cattle' projection to '%s' (no explicit '%s' data in future CSV)",
+                    variant, variant,
+                )
+
+    # ---- Tabular CSVs -----------------------------------------------------------
+    # manure_fractions.csv and manure_management.csv contain static behavioural
+    # parameters (per-system grazing/housing fractions, manure management system
+    # distributions) that do not change with SSP scenario or year.  They are
+    # copied from baseline unchanged.  Only production_systems.csv (intensive /
+    # extensive splits) genuinely varies across scenarios and is updated from the
+    # future DataFrame.
+    updated_csvs: dict[str, str] = {}
+
+    # Copy-as-is: manure_fractions and manure_management.
+    for csv_name in ("manure_fractions.csv", "manure_management.csv"):
+        csv_key = csv_name.replace(".csv", "")
+        if tabular_outputs is not None and csv_key not in tabular_outputs:
+            continue
+        src_csv = baseline_livestock_dir / csv_name
+        if not src_csv.is_file():
+            logger.warning("Baseline CSV not found: %s — skipping", src_csv)
+            continue
+        dst_csv = output_dir / csv_name
+        dst_csv.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src_csv, dst_csv)
+        updated_csvs[csv_key] = str(dst_csv)
+        logger.debug("Copied baseline CSV unchanged: %s", dst_csv)
+
+    # Update from future DataFrame: production_systems only.
+    for csv_name in ("production_systems.csv",):
+        csv_key = csv_name.replace(".csv", "")
+        # Skip this CSV if a specific set of tabular outputs was requested and
+        # this file is not in it.
+        if tabular_outputs is not None and csv_key not in tabular_outputs:
+            continue
+        baseline_csv = baseline_livestock_dir / csv_name
+        if not baseline_csv.is_file():
+            logger.warning("Baseline CSV not found: %s — skipping", baseline_csv)
+            continue
+        out_csv = output_dir / csv_name
+        # Filter future DataFrame to only schema-defined columns when a field-set
+        # is available for this output file.  This ensures the CSV update cannot
+        # accidentally overwrite columns that belong to a different schema.
+        if tabular_schema_fields and csv_key in tabular_schema_fields:
+            allowed = tabular_schema_fields[csv_key] | {"alpha3"}
+            allowed_lower = {c.lower() for c in allowed}
+            filtered_df = livestock_future_df[
+                [c for c in livestock_future_df.columns if c.lower() in allowed_lower]
+            ]
+        else:
+            filtered_df = livestock_future_df
+        _update_tabular_csv_from_future(baseline_csv, out_csv, filtered_df, mapping)
+        updated_csvs[csv_key] = str(out_csv)
+        logger.debug("Updated tabular CSV: %s", out_csv)
+
+    return {
+        "output_dir": str(output_dir),
+        "animal_heads": created_tifs,
+        **updated_csvs,
     }

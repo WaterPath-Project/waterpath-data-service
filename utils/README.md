@@ -1,6 +1,6 @@
-# Utilities for Verifying NetCDF Clipping and Year Selection
+# Utilities
 
-This folder contains diagnostic scripts to verify that population projection data is being processed correctly.
+This folder contains diagnostic scripts and tests used during development and validation of the waterpath-data-service.
 
 ## Prerequisites
 
@@ -81,6 +81,89 @@ poetry run python utils/extract_year_sample.py --ssp SSP2 --year 2050 --sample-s
 
 ---
 
+### 4. Debug Raster (`debug_raster.py`)
+
+Quick diagnostic for any single-band GeoTIFF — prints shape, CRS, nodata value,
+min/max/mean, non-zero pixel count, and a sample of unique values.  Accepts the
+raster path as a command-line argument.
+
+**Usage:**
+```powershell
+# Pass the path as an argument
+poetry run python utils/debug_raster.py waterpath_data_service/data/<session>/scenarios/SSP1_2025/isoraster.tif
+
+# Falls back to a hard-coded Kampala isoraster if no argument is given
+poetry run python utils/debug_raster.py
+```
+
+---
+
+### 5. Analyze Raster Values (`analyze_raster_values.py`)
+
+More detailed statistics for a raster, including a bucketed value distribution
+(< 10k, 10k–50k, 50k–100k, 100k–500k, > 500k) and sample raw pixel values.
+The path is hard-coded to a Kampala isoraster; edit the script or adapt it for
+other datasets.
+
+**Usage:**
+```powershell
+poetry run python utils/analyze_raster_values.py
+```
+
+---
+
+### 6. Check Baseline Population (`check_baseline_pop.py`)
+
+Reads the baseline `human_emissions.csv` for a session and prints the total
+population, per-area mean, area count, and the first ten rows.  The path is
+hard-coded to the Kampala dataset; edit for other sessions.
+
+**Usage:**
+```powershell
+poetry run python utils/check_baseline_pop.py
+```
+
+---
+
+### 7. Test Zonal Calculation (`test_zonal_calc.py`)
+
+Manual smoke-test for `calculate_zonal_population` from `projections.py`.
+Reads the Kampala geodata shapefile and isoraster, runs the zonal calculation,
+and reports per-area results, the total population sum, and any areas with zero
+population.
+
+**Usage:**
+```powershell
+poetry run python utils/test_zonal_calc.py
+```
+
+---
+
+### 8. Projection Tests (`test_projections.py`)
+
+Comprehensive pytest test suite that validates the projection pipeline end-to-end
+for both country-level and sub-national data.  Covers:
+
+- `read_schema_field_names` — verifies that all static schemas parse correctly
+- Treatment projections — column set matches schema, fraction values ≤ 1,
+  quaternary derivation when absent
+- Sanitation projections — column set, numeric integrity checks
+- Livestock schema filtering — tabular CSV is constrained to schema-declared
+  fields; meat/dairy columns inherit cattle values when absent from the future CSV
+- Country-level isodata projections (Balkan test session, mocked HTTP)
+- Sub-national projections (Dhaka test session)
+
+**Usage:**
+```powershell
+# Run all projection tests
+poetry run pytest utils/test_projections.py -v
+
+# Run a single test class
+poetry run pytest utils/test_projections.py::TestTreatmentProjection -v
+```
+
+---
+
 ## Example Workflow
 
 ### Verify a projection was generated correctly:
@@ -106,6 +189,11 @@ poetry run python utils/extract_year_sample.py --ssp SSP2 --year 2050 --sample-s
    - Raster bounds are within shapefile bounds ✓
    - Visual overlay shows the clipped region aligns with shapefile
    - Valid pixel percentage is reasonable (not 100% nodata)
+
+4. **Run debt-free projection tests:**
+   ```powershell
+   poetry run pytest utils/test_projections.py -v
+   ```
 
 ---
 

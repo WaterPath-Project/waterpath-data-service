@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import logging
 import shutil
 from pathlib import Path
@@ -39,6 +40,14 @@ _SANITATION_FUTURE_URL = (
     "https://raw.githubusercontent.com/WaterPath-Project/waterpath-data"
     "/refs/heads/main/jmp_household_surveys/data/sanitation_combined_future.csv"
 )
+_TREATMENT_FUTURE_URL = (
+    "https://raw.githubusercontent.com/WaterPath-Project/waterpath-data"
+    "/refs/heads/main/treatment_fractions/data/treatment_future.csv"
+)
+_LIVESTOCK_FUTURE_URL = (
+    "https://raw.githubusercontent.com/WaterPath-Project/waterpath-data"
+    "/refs/heads/main/livestock_projections/data/livestock_future.csv"
+)
 
 _ASSUMPTIONS_URLS: dict[str, str] = {
     "urbanization": (
@@ -73,7 +82,17 @@ async def fetch_treatment_fractions_csv(alpha3_list: list[str]) -> pd.DataFrame:
     """Fetch the country-level treatment fractions dataset from GitHub.
 
     Columns: ``alpha3``, ``FractionPrimarytreatment``,
-    ``FractionSecondarytreatment``, ``FractionTertiarytreatment``.
+    ``FractionSecondarytreatment``, ``FractionTertiarytreatment``,
+    ``FractionQuaternarytreatment``.
+
+    ``FractionQuaternarytreatment`` is derived as
+    ``max(0, 1 - Primary - Secondary - Tertiary)`` when absent from the source
+    data, mirroring the same logic applied to future projections.
+
+    Countries in *alpha3_list* that are absent from the remote CSV receive a
+    fallback row with all fractions set to zero and
+    ``FractionQuaternarytreatment = 1.0`` (conservative "no treatment data"
+    assumption).
 
     The returned DataFrame is filtered to the requested *alpha3_list*.
     """
@@ -81,7 +100,144 @@ async def fetch_treatment_fractions_csv(alpha3_list: list[str]) -> pd.DataFrame:
         r = await client.get(TREATMENT_FRACTIONS_URL, timeout=30)
         r.raise_for_status()
     df = pd.read_csv(io.StringIO(r.text))
-    return df[df["alpha3"].isin(alpha3_list)].copy()
+    df = df[df["alpha3"].isin(alpha3_list)].copy()
+
+    # Ensure FractionQuaternarytreatment column exists.
+    col_lower = {c.lower(): c for c in df.columns}
+    # Normalise any existing variant of the column name to the canonical spelling.
+    for variant in ("fractionquartenarytreatment", "fractionquarternarytreatment"):
+        if variant in col_lower and col_lower[variant] != "FractionQuaternarytreatment":
+            df = df.rename(columns={col_lower[variant]: "FractionQuaternarytreatment"})
+            col_lower = {c.lower(): c for c in df.columns}
+    if "fractionquaternarytreatment" not in col_lower:
+        primary   = col_lower.get("fractionprimarytreatment")
+        secondary = col_lower.get("fractionsecondarytreatment")
+        tertiary  = col_lower.get("fractiontertiarytreatment")
+        if primary and secondary and tertiary:
+            df["FractionQuaternarytreatment"] = (
+                1.0
+                - pd.to_numeric(df[primary],   errors="coerce").fillna(0)
+                - pd.to_numeric(df[secondary], errors="coerce").fillna(0)
+                - pd.to_numeric(df[tertiary],  errors="coerce").fillna(0)
+            ).clip(lower=0.0)
+        else:
+            df["FractionQuaternarytreatment"] = 0.0
+
+    # Add fallback rows for countries absent from the remote dataset so the
+    # returned DataFrame always contains one row per requested alpha3.
+    missing = set(alpha3_list) - set(df["alpha3"])
+    if missing:
+        logger.warning(
+            "fetch_treatment_fractions_csv: no source data for %s — "
+            "using fallback (FractionQuaternarytreatment=1.0, all others 0).",
+            sorted(missing),
+        )
+        fallback = pd.DataFrame({
+            "alpha3":                        sorted(missing),
+            "FractionPrimarytreatment":      0.0,
+            "FractionSecondarytreatment":    0.0,
+            "FractionTertiarytreatment":     0.0,
+            "FractionQuaternarytreatment":   1.0,
+        })
+        df = pd.concat([df, fallback], ignore_index=True)
+
+    return df
+
+
+async def fetch_treatment_future_csv(
+    alpha3_list: list[str],
+    ssp: str,
+    year: int,
+) -> pd.DataFrame:
+    """Fetch projected treatment fractions from ``treatment_future.csv``.
+
+    Filters to *alpha3_list*, *ssp*, and *year*.  If ``FractionQuaternarytreatment``
+    is absent it is added as ``max(0, 1 - Primary - Secondary - Tertiary)``.
+
+    Returns a DataFrame keyed by ``alpha3``.
+    """
+    async with httpx.AsyncClient() as client:
+        r = await client.get(_TREATMENT_FUTURE_URL, timeout=30)
+        r.raise_for_status()
+    df = pd.read_csv(io.StringIO(r.text))
+
+    alpha3_col = next((c for c in df.columns if c.lower() == "alpha3"), None)
+    scenario_col = next((c for c in df.columns if c.lower() in ("scenario", "ssp")), None)
+    year_col = next((c for c in df.columns if c.lower() == "year"), None)
+    if alpha3_col is None:
+        raise ValueError("treatment_future.csv is missing an alpha3 column.")
+
+    ssp_norm = ssp.strip().upper()
+    if scenario_col is not None:
+        df = df[df[scenario_col].astype(str).str.strip().str.upper() == ssp_norm]
+    if year_col is not None:
+        df[year_col] = pd.to_numeric(df[year_col], errors="coerce")
+        df = df[df[year_col] == year]
+    df = df[df[alpha3_col].isin(alpha3_list)].copy()
+    if alpha3_col != "alpha3":
+        df = df.rename(columns={alpha3_col: "alpha3"})
+
+    # Ensure FractionQuaternarytreatment column exists.
+    col_lower = {c.lower(): c for c in df.columns}
+    # Normalise any existing variant of the column name to the canonical spelling.
+    for variant in ("fractionquartenarytreatment", "fractionquarternarytreatment"):
+        if variant in col_lower and col_lower[variant] != "FractionQuaternarytreatment":
+            df = df.rename(columns={col_lower[variant]: "FractionQuaternarytreatment"})
+            col_lower = {c.lower(): c for c in df.columns}
+    if "fractionquaternarytreatment" not in col_lower:
+        primary   = col_lower.get("fractionprimarytreatment")
+        secondary = col_lower.get("fractionsecondarytreatment")
+        tertiary  = col_lower.get("fractiontertiarytreatment")
+        if primary and secondary and tertiary:
+            df["FractionQuaternarytreatment"] = (
+                1.0
+                - pd.to_numeric(df[primary],   errors="coerce").fillna(0)
+                - pd.to_numeric(df[secondary], errors="coerce").fillna(0)
+                - pd.to_numeric(df[tertiary],  errors="coerce").fillna(0)
+            ).clip(lower=0.0)
+        else:
+            df["FractionQuaternarytreatment"] = 0.0
+
+    drop_cols = [c for c in [scenario_col, year_col] if c in df.columns]
+    return df.drop(columns=drop_cols)
+
+
+async def fetch_livestock_future_csv(
+    alpha3_list: list[str],
+    ssp: str,
+    year: int,
+) -> pd.DataFrame:
+    """Fetch projected livestock data from ``livestock_future.csv``.
+
+    Filters to *alpha3_list*, *ssp*, and *year*.  Returns a DataFrame with
+    ``alpha3`` plus all available projection columns (animal counts, manure
+    fractions, production system fractions).
+
+    The scenario and year columns are dropped from the result.
+    """
+    async with httpx.AsyncClient() as client:
+        r = await client.get(_LIVESTOCK_FUTURE_URL, timeout=30)
+        r.raise_for_status()
+    df = pd.read_csv(io.StringIO(r.text))
+
+    alpha3_col = next((c for c in df.columns if c.lower() == "alpha3"), None)
+    scenario_col = next((c for c in df.columns if c.lower() in ("scenario", "ssp")), None)
+    year_col = next((c for c in df.columns if c.lower() == "year"), None)
+    if alpha3_col is None:
+        raise ValueError("livestock_future.csv is missing an alpha3 column.")
+
+    ssp_norm = ssp.strip().upper()
+    if scenario_col is not None:
+        df = df[df[scenario_col].astype(str).str.strip().str.upper() == ssp_norm]
+    if year_col is not None:
+        df[year_col] = pd.to_numeric(df[year_col], errors="coerce")
+        df = df[df[year_col] == year]
+    df = df[df[alpha3_col].isin(alpha3_list)].copy()
+    if alpha3_col != "alpha3":
+        df = df.rename(columns={alpha3_col: "alpha3"})
+
+    drop_cols = [c for c in [scenario_col, year_col] if c in df.columns]
+    return df.drop(columns=drop_cols)
 
 
 async def fetch_sanitation_projection(
@@ -255,6 +411,18 @@ async def fetch_assumptions(dataset_keys: list[str]) -> list[dict]:
             except Exception as exc:
                 logger.warning("Could not fetch assumptions for '%s': %s", key, exc)
     return results
+
+
+def read_schema_field_names(schema_path: Path) -> set[str]:
+    """Return the set of field names defined in a Frictionless Table Schema JSON file.
+
+    This is used to constrain which columns from a remote projection CSV are
+    applied when updating a particular output file, ensuring outputs conform to
+    their declared schemas.
+    """
+    with open(schema_path, encoding="utf-8") as fh:
+        schema_doc = json.load(fh)
+    return {field["name"] for field in schema_doc.get("fields", [])}
 
 
 async def update_isodata_projected_variables(

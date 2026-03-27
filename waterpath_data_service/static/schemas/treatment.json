@@ -40,6 +40,17 @@
                 "minimum": 0,
                 "maximum": 1
             }
+        },
+        {
+            "name": "FractionQuaternarytreatment",
+            "type": "number",
+            "title": "Fraction for Quaternary treatment",
+            "description": "",
+            "float_number": true,
+            "constraints": {
+                "minimum": 0,
+                "maximum": 1
+            }
         }
     ],
     "missingValues": [

@@ -10,14 +10,22 @@ from waterpath_data_service.services.projections import (
     update_human_emissions_population,
     update_isodata_projected_variables,
     fetch_treatment_fractions_csv,
+    fetch_treatment_future_csv,
+    fetch_livestock_future_csv,
     fetch_sanitation_projection,
     fetch_assumptions,
+    read_schema_field_names,
 )
 from waterpath_data_service.services.temperature import (
     generate_temperature_tif,
     _baseline_temperature_path,
 )
-from waterpath_data_service.services.livestock import generate_livestock_tabular_inputs
+from waterpath_data_service.services.livestock import (
+    generate_livestock_tabular_inputs,
+    generate_livestock_projection_rasters,
+    _load_iso_gid_mapping,
+    _build_livestock_zone_template,
+)
 from fastapi import APIRouter, HTTPException, UploadFile, File, Query
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
@@ -32,6 +40,30 @@ _DATA_DIR: Path = settings.data_dir
 
 # Static assets (schemas, look-up tables) – always bundled with the container image.
 _STATIC_DIR: Path = Path(__file__).parent.parent.parent.parent / "static"
+
+# Field sets read from the livestock schema files, used to constrain which
+# columns from livestock_future.csv are applied to each output CSV.
+def _load_livestock_tabular_schema_fields() -> dict[str, set[str]]:
+    schemas_dir = _STATIC_DIR / "schemas"
+    mapping = {
+        "manure_fractions": "livestock_manure_fractions.json",
+        "production_systems": "livestock_production_systems.json",
+    }
+    result: dict[str, set[str]] = {}
+    for key, fname in mapping.items():
+        path = schemas_dir / fname
+        if path.is_file():
+            result[key] = read_schema_field_names(path)
+    return result
+
+# Maps livestock sub-schema names to generate_livestock_projection_rasters kwargs.
+# Use schema=livestock for all outputs; use a sub-schema to restrict what is written.
+_LIVESTOCK_SUB_SCHEMA_PARAMS: dict[str, dict] = {
+    "livestock_isodata":            {"generate_rasters": True,  "tabular_outputs": set()},
+    "livestock_manure_fractions":   {"generate_rasters": False, "tabular_outputs": {"manure_fractions"}},
+    "livestock_production_systems": {"generate_rasters": False, "tabular_outputs": {"production_systems"}},
+    "livestock_manure_management":  {"generate_rasters": False, "tabular_outputs": {"manure_management"}},
+}
 
 schemas = ["population", "sanitation", "treatment"]
 livestock_schema_files = [
@@ -221,7 +253,14 @@ async def generate_projection_data(
     session_id: str,
     schema: str = Query(
         ...,
-        description="Which schema to generate projections for (population, sanitation, treatment, all)",
+        description=(
+            "Which schema to generate projections for. "
+            "Human emissions: population, sanitation, treatment. "
+            "Livestock (all outputs): livestock. "
+            "Livestock sub-schemas: livestock_isodata (animal heads rasters only), "
+            "livestock_manure_fractions, livestock_production_systems, livestock_manure_management. "
+            "Use 'all' to generate population, sanitation, and treatment together."
+        ),
         examples=["population"],
     ),
     year: int = Query(..., description="Projection year", examples=[2025, 2030, 2050, 2100]),
@@ -230,7 +269,11 @@ async def generate_projection_data(
     """Generate projected data for a given schema, year, and SSP scenario."""
 
     schema_norm = schema.strip().lower()
-    allowed_schema = {"population", "sanitation", "treatment", "all"}
+    allowed_schema = {
+        "population", "sanitation", "treatment", "all",
+        "livestock", "livestock_isodata", "livestock_manure_fractions",
+        "livestock_production_systems", "livestock_manure_management",
+    }
     if schema_norm not in allowed_schema:
         raise HTTPException(
             status_code=422,
@@ -357,7 +400,7 @@ async def generate_projection_data(
                 if _gid_col is None:
                     raise ValueError("No GID column found in isodata.csv.")
                 _alpha3_list = _iso_df[_gid_col].astype(str).str[:3].unique().tolist()
-                treatment_df = await fetch_treatment_fractions_csv(_alpha3_list)
+                treatment_df = await fetch_treatment_future_csv(_alpha3_list, ssp_norm, year)
                 treatment_df = treatment_df.rename(columns={"alpha3": "gid"})
                 out_csv = scenario_dir / "treatment.csv"
                 treatment_df.to_csv(out_csv, index=False)
@@ -369,6 +412,51 @@ async def generate_projection_data(
                 "schema": "treatment",
                 "projected_csv": str(out_csv),
                 "assumptions": assumptions,
+            })
+
+        elif _schema == "livestock" or _schema.startswith("livestock_"):
+            baseline_livestock_dir = session_dir / "baseline" / "livestock_emissions"
+            try:
+                # Auto-generate baseline livestock inputs from isodata if not present.
+                if not (baseline_livestock_dir / "animals").is_dir():
+                    logger.info(
+                        "Baseline livestock not found for session %s — generating from isodata.",
+                        session_id,
+                    )
+                    generate_livestock_tabular_inputs(
+                        session_dir=session_dir,
+                        static_data_dir=static_data_dir,
+                    )
+
+                _iso_df = pd.read_csv(scenario_human_emissions_path)
+                _gid_col = next((c for c in ["gid", "alpha3", "iso_country"] if c in _iso_df.columns), None)
+                if _gid_col is None:
+                    raise ValueError("No GID column found in isodata.csv.")
+                _alpha3_list = _iso_df[_gid_col].astype(str).str[:3].unique().tolist()
+
+                livestock_future_df = await fetch_livestock_future_csv(_alpha3_list, ssp_norm, year)
+                _mapping = _load_iso_gid_mapping(session_dir)
+                _zone_idx, _valid_mask, _zone_profile = _build_livestock_zone_template(
+                    session_dir, static_data_dir, _mapping
+                )
+                ls_result = generate_livestock_projection_rasters(
+                    baseline_livestock_dir=baseline_livestock_dir,
+                    output_dir=scenario_dir / "livestock_emissions",
+                    livestock_future_df=livestock_future_df,
+                    mapping=_mapping,
+                    zone_idx=_zone_idx,
+                    valid_mask=_valid_mask,
+                    zone_profile=_zone_profile,
+                    tabular_schema_fields=_load_livestock_tabular_schema_fields(),
+                    **_LIVESTOCK_SUB_SCHEMA_PARAMS.get(_schema, {}),
+                )
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail=f"Failed to generate livestock projection: {exc}")
+
+            schema_results.append({
+                "schema": _schema,
+                "output_dir": ls_result["output_dir"],
+                "animal_heads": ls_result.get("animal_heads", {}),
             })
 
     # Write summary.json to the scenario directory.
@@ -485,7 +573,14 @@ async def validate_projection_population(
 async def download_projection(
     schema: str = Query(
         ...,
-        description="Which schema to project (population, sanitation, treatment, all)",
+        description=(
+            "Which schema to project. "
+            "Human emissions: population, sanitation, treatment. "
+            "Livestock (all outputs): livestock. "
+            "Livestock sub-schemas: livestock_isodata (animal heads rasters only), "
+            "livestock_manure_fractions, livestock_production_systems, livestock_manure_management. "
+            "Use 'all' to generate population, sanitation, treatment, and livestock together."
+        ),
         examples=["population"],
     ),
     year: int = Query(..., description="Projection year", examples=[2025, 2030, 2050, 2100]),
@@ -507,8 +602,13 @@ async def download_projection(
     import tempfile
 
     schema_norm = schema.strip().lower()
-    if schema_norm not in {"population", "sanitation", "treatment", "all"}:
-        raise HTTPException(status_code=422, detail="Invalid schema. Allowed: population, sanitation, treatment, all")
+    _allowed_dl = {
+        "population", "sanitation", "treatment", "all",
+        "livestock", "livestock_isodata", "livestock_manure_fractions",
+        "livestock_production_systems", "livestock_manure_management",
+    }
+    if schema_norm not in _allowed_dl:
+        raise HTTPException(status_code=422, detail=f"Invalid schema. Allowed: {sorted(_allowed_dl)}")
 
     allowed_years = {2025, 2030, 2050, 2100}
     if year not in allowed_years:
@@ -560,7 +660,7 @@ async def download_projection(
         # Detect admin level: 3-char gids are country codes; longer gids are sub-national.
         is_country_level = all(len(str(g)) <= 3 for g in gids_list)
         alpha3_list = [str(g)[:3] for g in gids_list]
-        schemas_to_generate = ["population", "sanitation", "treatment"] if schema_norm == "all" else [schema_norm]
+        schemas_to_generate = ["population", "sanitation", "treatment", "livestock"] if schema_norm == "all" else [schema_norm]
 
         if "population" in schemas_to_generate:
             from waterpath_data_service.services.projections import (
@@ -627,14 +727,65 @@ async def download_projection(
 
         if "treatment" in schemas_to_generate:
             try:
-                treatment_df = await fetch_treatment_fractions_csv(alpha3_list)
+                treatment_df = await fetch_treatment_future_csv(alpha3_list, ssp_norm, year)
                 treatment_df = treatment_df.rename(columns={"alpha3": "gid"})
                 treatment_csv_path = scenario_dir / "treatment.csv"
                 treatment_df.to_csv(treatment_csv_path, index=False)
             except Exception as exc:
-                raise HTTPException(status_code=500, detail=f"Failed to fetch treatment fractions: {exc}")
+                raise HTTPException(status_code=500, detail=f"Failed to fetch treatment projections: {exc}")
             treat_assumptions = await fetch_assumptions(["treatment_fractions"])
             all_assumptions.extend(treat_assumptions)
+
+        _livestock_schema = next(
+            (s for s in schemas_to_generate if s == "livestock" or s.startswith("livestock_")), None
+        )
+        if _livestock_schema is not None:
+            _ls_sub_params = _LIVESTOCK_SUB_SCHEMA_PARAMS.get(_livestock_schema, {})
+            try:
+                # Write population CSV to the path expected by livestock helpers.
+                _baseline_dir = tmp_path / "baseline"
+                (_baseline_dir / "human_emissions").mkdir(parents=True, exist_ok=True)
+                _pop_df = baseline_df.copy()
+                if "iso" not in _pop_df.columns:
+                    _gid_order = {g: i + 1 for i, g in enumerate(_pop_df[gid_col].astype(str).unique())}
+                    _pop_df["iso"] = _pop_df[gid_col].astype(str).map(_gid_order)
+                if "gid" not in _pop_df.columns:
+                    _pop_df = _pop_df.rename(columns={gid_col: "gid"})
+                _pop_df.to_csv(_baseline_dir / "human_emissions" / "population.csv", index=False)
+
+                # Copy shapefile to baseline/geodata/ so livestock helpers find it.
+                _gd_src = tmp_path / "geodata"
+                _gd_dst = _baseline_dir / "geodata"
+                if _gd_src.is_dir() and not _gd_dst.exists():
+                    shutil.copytree(_gd_src, _gd_dst)
+
+                _ls_mapping = _load_iso_gid_mapping(tmp_path)
+                # Generate baseline livestock heads TIFs into tmp_path/baseline/livestock_emissions/
+                generate_livestock_tabular_inputs(tmp_path, static_data_dir)
+
+                livestock_future_df_dl = await fetch_livestock_future_csv(alpha3_list, ssp_norm, year)
+                _ls_zone_idx, _ls_valid_mask, _ls_zone_profile = _build_livestock_zone_template(
+                    tmp_path, static_data_dir, _ls_mapping
+                )
+                ls_result = generate_livestock_projection_rasters(
+                    baseline_livestock_dir=_baseline_dir / "livestock_emissions",
+                    output_dir=scenario_dir / "livestock_emissions",
+                    livestock_future_df=livestock_future_df_dl,
+                    mapping=_ls_mapping,
+                    zone_idx=_ls_zone_idx,
+                    valid_mask=_ls_valid_mask,
+                    zone_profile=_ls_zone_profile,
+                    tabular_schema_fields=_load_livestock_tabular_schema_fields(),
+                    **_ls_sub_params,
+                )
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail=f"Failed to generate livestock projection: {exc}")
+            schema_entries.append({
+                "schema": _livestock_schema,
+                "ssp": ssp_norm,
+                "year": year,
+                "animal_heads": ls_result.get("animal_heads", {}),
+            })
 
         # Compute per-area statistics.
         projected_df = pd.read_csv(projected_csv_path)
@@ -665,6 +816,11 @@ async def download_projection(
                     "n_areas": len(area_rows),
                     "areas": area_rows,
                 })
+            elif _schema == "livestock" or _schema.startswith("livestock_"):
+                # livestock stats are carried from the projection step above.
+                ls_entry = next((e for e in schema_entries if e.get("schema") == _schema), None)
+                if ls_entry is None:
+                    schema_entries.append({"schema": _schema, "ssp": ssp_norm, "year": year})
             else:
                 schema_entries.append({
                     "schema": _schema,
@@ -688,6 +844,15 @@ async def download_projection(
             treatment_csv = scenario_dir / "treatment.csv"
             if treatment_csv.is_file():
                 zipf.write(treatment_csv, arcname="treatment.csv")
+            # Add projected livestock TIFs if present.
+            ls_animals_dir = scenario_dir / "livestock_emissions" / "animals"
+            if ls_animals_dir.is_dir():
+                for tif_file in ls_animals_dir.glob("*_heads.tif"):
+                    zipf.write(tif_file, arcname=f"livestock_emissions/animals/{tif_file.name}")
+            for ls_csv in ("manure_fractions.csv", "production_systems.csv", "manure_management.csv"):
+                ls_csv_file = scenario_dir / "livestock_emissions" / ls_csv
+                if ls_csv_file.is_file():
+                    zipf.write(ls_csv_file, arcname=f"livestock_emissions/{ls_csv}")
 
         zip_buffer.seek(0)
 
@@ -848,6 +1013,17 @@ async def generate_input_data_package(session_id: str, gids: str, include_livest
                     dst = session_dir / schemas_path / schema_name
                     if src.is_file() and not dst.is_file():
                         shutil.copyfile(src, dst)
+                try:
+                    generate_livestock_tabular_inputs(
+                        session_dir=session_dir,
+                        static_data_dir=_STATIC_DIR / "data",
+                    )
+                except Exception as _ls_err:
+                    logger.warning(
+                        "Livestock baseline generation failed for session %s: %s",
+                        session_id,
+                        _ls_err,
+                    )
 
         except Exception as e:
             import traceback
