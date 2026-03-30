@@ -57,12 +57,13 @@ def _load_livestock_tabular_schema_fields() -> dict[str, set[str]]:
     return result
 
 # Maps livestock sub-schema names to generate_livestock_projection_rasters kwargs.
-# Use schema=livestock for all outputs; use a sub-schema to restrict what is written.
+# Use schema=livestock_emissions for all outputs; use a sub-schema to restrict what is written.
 _LIVESTOCK_SUB_SCHEMA_PARAMS: dict[str, dict] = {
     "livestock_isodata":            {"generate_rasters": True,  "tabular_outputs": set()},
     "livestock_manure_fractions":   {"generate_rasters": False, "tabular_outputs": {"manure_fractions"}},
     "livestock_production_systems": {"generate_rasters": False, "tabular_outputs": {"production_systems"}},
     "livestock_manure_management":  {"generate_rasters": False, "tabular_outputs": {"manure_management"}},
+    # livestock_emissions → default kwargs (all rasters + all tabular CSVs)
 }
 
 schemas = ["population", "sanitation", "treatment"]
@@ -255,11 +256,12 @@ async def generate_projection_data(
         ...,
         description=(
             "Which schema to generate projections for. "
-            "Human emissions: population, sanitation, treatment. "
-            "Livestock (all outputs): livestock. "
+            "Individual human emissions: population, sanitation, treatment. "
+            "All human emissions together: human_emissions. "
+            "All livestock outputs: livestock_emissions. "
             "Livestock sub-schemas: livestock_isodata (animal heads rasters only), "
             "livestock_manure_fractions, livestock_production_systems, livestock_manure_management. "
-            "Use 'all' to generate population, sanitation, and treatment together."
+            "Use 'all' to generate human_emissions and livestock_emissions together."
         ),
         examples=["population"],
     ),
@@ -271,7 +273,8 @@ async def generate_projection_data(
     schema_norm = schema.strip().lower()
     allowed_schema = {
         "population", "sanitation", "treatment", "all",
-        "livestock", "livestock_isodata", "livestock_manure_fractions",
+        "human_emissions",
+        "livestock_emissions", "livestock_isodata", "livestock_manure_fractions",
         "livestock_production_systems", "livestock_manure_management",
     }
     if schema_norm not in allowed_schema:
@@ -324,7 +327,12 @@ async def generate_projection_data(
         except Exception:
             pass
 
-    schemas_to_generate = ["population", "sanitation", "treatment"] if schema_norm == "all" else [schema_norm]
+    if schema_norm == "all":
+        schemas_to_generate = ["population", "sanitation", "treatment", "livestock_emissions"]
+    elif schema_norm == "human_emissions":
+        schemas_to_generate = ["population", "sanitation", "treatment"]
+    else:
+        schemas_to_generate = [schema_norm]
     schema_results: list[dict] = []
 
     for _schema in schemas_to_generate:
@@ -414,7 +422,7 @@ async def generate_projection_data(
                 "assumptions": assumptions,
             })
 
-        elif _schema == "livestock" or _schema.startswith("livestock_"):
+        elif _schema.startswith("livestock_"):
             baseline_livestock_dir = session_dir / "baseline" / "livestock_emissions"
             try:
                 # Auto-generate baseline livestock inputs from isodata if not present.
@@ -469,7 +477,7 @@ async def generate_projection_data(
     with open(scenario_dir / "summary.json", "w", encoding="utf-8") as sf:
         json.dump(summary_data, sf, indent=2)
 
-    if schema_norm == "all":
+    if schema_norm in ("all", "human_emissions"):
         return {
             "session_id": session_id,
             "year": year,
@@ -575,11 +583,12 @@ async def download_projection(
         ...,
         description=(
             "Which schema to project. "
-            "Human emissions: population, sanitation, treatment. "
-            "Livestock (all outputs): livestock. "
+            "Individual human emissions: population, sanitation, treatment. "
+            "All human emissions together: human_emissions. "
+            "All livestock outputs: livestock_emissions. "
             "Livestock sub-schemas: livestock_isodata (animal heads rasters only), "
             "livestock_manure_fractions, livestock_production_systems, livestock_manure_management. "
-            "Use 'all' to generate population, sanitation, treatment, and livestock together."
+            "Use 'all' to generate human_emissions and livestock_emissions together."
         ),
         examples=["population"],
     ),
@@ -604,7 +613,8 @@ async def download_projection(
     schema_norm = schema.strip().lower()
     _allowed_dl = {
         "population", "sanitation", "treatment", "all",
-        "livestock", "livestock_isodata", "livestock_manure_fractions",
+        "human_emissions",
+        "livestock_emissions", "livestock_isodata", "livestock_manure_fractions",
         "livestock_production_systems", "livestock_manure_management",
     }
     if schema_norm not in _allowed_dl:
@@ -660,7 +670,12 @@ async def download_projection(
         # Detect admin level: 3-char gids are country codes; longer gids are sub-national.
         is_country_level = all(len(str(g)) <= 3 for g in gids_list)
         alpha3_list = [str(g)[:3] for g in gids_list]
-        schemas_to_generate = ["population", "sanitation", "treatment", "livestock"] if schema_norm == "all" else [schema_norm]
+        if schema_norm == "all":
+            schemas_to_generate = ["population", "sanitation", "treatment", "livestock_emissions"]
+        elif schema_norm == "human_emissions":
+            schemas_to_generate = ["population", "sanitation", "treatment"]
+        else:
+            schemas_to_generate = [schema_norm]
 
         if "population" in schemas_to_generate:
             from waterpath_data_service.services.projections import (
@@ -737,7 +752,7 @@ async def download_projection(
             all_assumptions.extend(treat_assumptions)
 
         _livestock_schema = next(
-            (s for s in schemas_to_generate if s == "livestock" or s.startswith("livestock_")), None
+            (s for s in schemas_to_generate if s.startswith("livestock_")), None
         )
         if _livestock_schema is not None:
             _ls_sub_params = _LIVESTOCK_SUB_SCHEMA_PARAMS.get(_livestock_schema, {})
@@ -816,7 +831,7 @@ async def download_projection(
                     "n_areas": len(area_rows),
                     "areas": area_rows,
                 })
-            elif _schema == "livestock" or _schema.startswith("livestock_"):
+            elif _schema.startswith("livestock_"):
                 # livestock stats are carried from the projection step above.
                 ls_entry = next((e for e in schema_entries if e.get("schema") == _schema), None)
                 if ls_entry is None:

@@ -88,14 +88,29 @@ def _build_livestock_zone_template(
 
     xmin_data, ymin_data, xmax_data, ymax_data = features.total_bounds.tolist()
 
-    # Match prepare.R resolution snapping, but use a livestock raster as the native-resolution floor.
     extent_x = xmax_data - xmin_data
     extent_y = ymax_data - ymin_data
     diagonal = math.hypot(extent_x, extent_y)
+
+    # Floor the resolution at the GLW4 native pixel size so the zone grid is
+    # never finer than the source livestock data.  Upsampling GLW4 beyond its
+    # native ~0.083° would spread one source pixel over many destination pixels
+    # without adding spatial information.
     native_raster = static_data_dir / "glw4_2020" / "GLW4-2020.D-DA.CTL.tif"
-    src_native_res = _native_tif_resolution(native_raster)
-    raw = max(src_native_res, min(0.5, diagonal / 100.0))
+    glw4_native_res = _native_tif_resolution(native_raster)
+    raw = max(glw4_native_res, min(0.5, diagonal / 100.0))
     res = _round_to_nice_res(raw)
+
+    # Livestock data is not meaningful when the study area covers fewer than
+    # this many GLW4 pixels in each spatial dimension (e.g. city sub-districts).
+    _MIN_GLW4_PIXELS = 4
+    if extent_x < _MIN_GLW4_PIXELS * glw4_native_res or extent_y < _MIN_GLW4_PIXELS * glw4_native_res:
+        raise ValueError(
+            f"Study area extent ({extent_x:.4f}\u00b0 \u00d7 {extent_y:.4f}\u00b0) is too small "
+            f"for GLW4 livestock data: at least {_MIN_GLW4_PIXELS} source pixels "
+            f"({glw4_native_res:.4f}\u00b0 each) are required in each dimension. "
+            "Livestock inputs are not supported for sub-district study areas."
+        )
 
     xmin = max(math.floor(xmin_data / res) * res - res, -180.0)
     ymin = max(math.floor(ymin_data / res) * res - res, -90.0)

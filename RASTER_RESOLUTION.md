@@ -233,6 +233,88 @@ values representing **population counts per cell** (not density).
 
 ---
 
+## Livestock Raster Resampling
+
+Livestock head-count rasters are generated independently of the population
+pipeline, but use the same resolution-selection logic.  This section documents
+the additional complications introduced by the GLW4 source data.
+
+### Source data and units
+
+| Source                       | Species             | Unit stored          |
+|------------------------------|---------------------|----------------------|
+| GLW4 2020 (`GLW4-2020.D-DA.*`) | Cattle, buffaloes, chickens, goats, pigs, sheep | **heads / km²** (density) |
+| GLW4 2015 (`5_Dk_2015_Da.tif`) | Ducks               | **heads / pixel** (total) |
+| Sheep + goat proxy (GLW4 2020) | Horses, asses, mules, camels, donkeys | derived from density |
+
+The unit mismatch between the 2020 and 2015 rasters means density→counts
+conversion must be applied selectively.
+
+### Density → heads/pixel conversion
+
+Immediately after clipping each GLW4 2020 raster to the zone grid, the array
+is multiplied by a pixel-area matrix:
+
+```
+heads/pixel = (heads/km²) × pixel_area_km²
+```
+
+The pixel area is computed per row to account for the cosine-latitude dependence
+of pixel width (identical formula to the population pipeline):
+
+```
+pixel_area_km² = (res_deg × 111.32)² × cos(lat)
+```
+
+This conversion is implemented in `_pixel_area_km2()` and applied in
+`_generate_animal_heads_rasters()` in `livestock.py`.  The duck raster already
+stores total heads/pixel, so no conversion is applied to it.  The sheep/goat
+proxy arrays are converted before the proxy ratio is applied so that the proxy
+species' rasters are also in heads/pixel.
+
+### Resolution for livestock vs population rasters
+
+The livestock zone template is built by `_build_livestock_zone_template()` using
+a floored variant of the `diagonal / 100` rule:
+
+```
+raw = max(glw4_native_res, min(0.5°, diagonal / 100))
+res = snap_to_nice_resolution(raw)
+```
+
+The floor at `glw4_native_res` (~0.083°) prevents the zone grid from being
+finer than the GLW4 source data.  Upsampling GLW4 beyond its native resolution
+would spread one source pixel's density uniformly over many smaller destination
+pixels, adding no spatial information and producing an artificially smooth
+distribution.
+
+### Minimum study area requirement
+
+The zone template also enforces a minimum extent: the study area must span at
+least **4 GLW4 pixels** (~0.33°) in each spatial dimension.  Areas smaller than
+this (e.g. city sub-districts at admin level 4 or finer) produce so few source
+pixels that the resulting rasters carry no meaningful livestock distribution.
+`_build_livestock_zone_template` raises a `ValueError` for such areas; the API
+surfaces this as a 500 error with a descriptive message.
+
+See [LIVESTOCK_ISSUES.md](LIVESTOCK_ISSUES.md) §5 for background.
+
+### Projection: scaling heads rasters by SSP growth rates
+
+Scenario projections scale the baseline heads rasters using per-country growth
+rates derived from `livestock_future.csv`:
+
+```
+rate[alpha3] = future_heads[alpha3] / sum(baseline_pixels[alpha3])
+```
+
+Pixels in each country zone are multiplied by that country's rate.  Countries
+absent from the future CSV default to rate = 1.0 (no change from baseline).
+Total heads in the projected raster therefore match the future CSV values
+(within rounding), regardless of the zone grid resolution.
+
+---
+
 ## Adding Higher-Resolution Sources
 
 If a finer source raster is available (e.g. WorldPop country tiles at 100 m ≈

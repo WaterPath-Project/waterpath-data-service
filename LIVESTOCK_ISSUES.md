@@ -40,3 +40,55 @@
 - Functions: `_clip_raster_to_zone_grid`, `_generate_animal_heads_rasters`, `_generate_animal_isoraster`
 
 For further details, see the comments in the code and this document.
+
+---
+
+### 4. GLW4 Rasters Store Density, Not Total Heads
+
+**Issue:**
+GLW4 2020 rasters (cattle, buffaloes, chickens, goats, pigs, sheep) store animal
+*density* in heads/km², not total heads per pixel.  The GLW4 2015 duck raster
+stores total heads per pixel.  Treating density rasters as counts inflated values
+in large high-latitude pixels and produced biologically impossible results (e.g.
+ducks greatly outnumbering chickens in the Balkans).
+
+**Fix:**
+A `_pixel_area_km2()` helper computes the geodetic area of every pixel in the
+zone grid:
+
+```
+area_km² = (res_deg × 111.32)² × cos(lat)
+```
+
+GLW4 2020 density arrays are multiplied by this pixel-area matrix immediately
+after clipping, converting them to total heads per pixel before any further
+processing.  The duck raster is left unchanged.  The sheep/goat proxy arrays
+used for horses, asses, mules, and camels are also converted before the proxy
+ratio is applied.
+
+---
+
+### 5. Livestock Not Supported for Sub-District Study Areas
+
+**Known Limitation:**
+GLW4 has a native resolution of ~0.083° (~9 km per pixel).  For very small urban
+study areas — such as Kampala level-4 sub-districts (extent ~0.16° × 0.19°) —
+the entire study area is covered by fewer than 4 GLW4 pixels in each dimension.
+This produces a near-empty raster with no meaningful spatial distribution of
+animal heads, and the result cannot sensibly align with the fine-grained
+human-emissions isoraster.
+
+**Decision:**
+Livestock inputs are **not supported** for study areas where the spatial extent
+is less than 4 × the GLW4 native pixel size (~0.33°) in either direction.
+`_build_livestock_zone_template` raises a `ValueError` for such areas, which
+the API surfaces as a 500 error with a descriptive message.
+
+The GLW4 native-resolution floor is retained in the resolution logic:
+```python
+raw = max(glw4_native_res, min(0.5, diagonal / 100.0))
+```
+
+**Affected case studies:** Any study area at sub-district scale (typically
+admin level 4 or finer) where the bounding box is smaller than ~0.33° in
+either longitude or latitude extent.

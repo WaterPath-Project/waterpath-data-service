@@ -164,12 +164,14 @@ def prepare_spatial_inputs(
             gid_to_furban[str(row["gid"]).strip()] = float(frac)
 
     # Per shapefile feature: resolve GID string, look up iso integer burn value.
-    # Priority: GID_3 > GID_2 > GID_1 > GID_0 (highest admin level present).
+    # Priority: GID_5 > GID_4 > GID_3 > GID_2 > GID_1 > GID_0 (highest admin level present).
     iso_ids: List[int] = []
     id_to_gid: Dict[int, str] = {}
     for idx, (_, feat) in enumerate(features.iterrows()):
         gid = str(
-            feat.get("GID_3")
+            feat.get("GID_5")
+            or feat.get("GID_4")
+            or feat.get("GID_3")
             or feat.get("GID_2")
             or feat.get("GID_1")
             or feat.get("GID_0")
