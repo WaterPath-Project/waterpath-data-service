@@ -20,6 +20,7 @@ from waterpath_data_service.services.temperature import (
     generate_temperature_tif,
     _baseline_temperature_path,
 )
+from waterpath_data_service.services.hydrology import generate_hydrology_inputs
 from waterpath_data_service.services.livestock import (
     generate_livestock_tabular_inputs,
     generate_livestock_projection_rasters,
@@ -212,6 +213,15 @@ async def download_input_data(session_id: str, file_id: str | None = None):
                                 rel = item.relative_to(livestock_emissions_dir).as_posix()
                                 zipf.write(item, arcname=f"livestock_emissions/{rel}")
 
+                    # Add hydrology/ folder if present
+                    hydrology_dir = default_dir / "hydrology"
+                    if hydrology_dir.is_dir():
+                        zipf.writestr(zipfile.ZipInfo("hydrology/"), "")
+                        for item in hydrology_dir.rglob("*"):
+                            if item.is_file():
+                                rel = item.relative_to(hydrology_dir).as_posix()
+                                zipf.write(item, arcname=f"hydrology/{rel}")
+
                 zip_buffer.seek(0)
 
             except HTTPException:
@@ -261,7 +271,8 @@ async def generate_projection_data(
             "All livestock outputs: livestock_emissions. "
             "Livestock sub-schemas: livestock_isodata (animal heads rasters only), "
             "livestock_manure_fractions, livestock_production_systems, livestock_manure_management. "
-            "Use 'all' to generate human_emissions and livestock_emissions together."
+            "Hydrology inputs clipped to the study area: hydrology. "
+            "Use 'all' to generate human_emissions, livestock_emissions and hydrology together."
         ),
         examples=["population"],
     ),
@@ -276,6 +287,7 @@ async def generate_projection_data(
         "human_emissions",
         "livestock_emissions", "livestock_isodata", "livestock_manure_fractions",
         "livestock_production_systems", "livestock_manure_management",
+        "hydrology",
     }
     if schema_norm not in allowed_schema:
         raise HTTPException(
@@ -328,7 +340,7 @@ async def generate_projection_data(
             pass
 
     if schema_norm == "all":
-        schemas_to_generate = ["population", "sanitation", "treatment", "livestock_emissions"]
+        schemas_to_generate = ["population", "sanitation", "treatment", "livestock_emissions", "hydrology"]
     elif schema_norm == "human_emissions":
         schemas_to_generate = ["population", "sanitation", "treatment"]
     else:
@@ -465,6 +477,37 @@ async def generate_projection_data(
                 "schema": _schema,
                 "output_dir": ls_result["output_dir"],
                 "animal_heads": ls_result.get("animal_heads", {}),
+            })
+
+        elif _schema == "hydrology":
+            _shp_path = session_dir / "baseline" / "geodata" / "geodata.shp"
+            if not _shp_path.is_file():
+                _shp_path = session_dir / "geodata" / "geodata.shp"
+            if not _shp_path.is_file():
+                raise HTTPException(
+                    status_code=500,
+                    detail="Shapefile not found. Run /input/generate first.",
+                )
+            _hydro_ref = session_dir / "baseline" / "human_emissions" / "isoraster.tif"
+            try:
+                hydro_result = generate_hydrology_inputs(
+                    shapefile_path=_shp_path,
+                    static_data_dir=static_data_dir,
+                    out_dir=scenario_dir,
+                    ssp=ssp_norm,
+                    year=year,
+                    reference_raster_path=_hydro_ref if _hydro_ref.is_file() else None,
+                )
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to generate hydrology inputs: {exc}",
+                )
+            schema_results.append({
+                "schema": "hydrology",
+                "hydrology_dir": hydro_result["hydrology_dir"],
+                "model": hydro_result["model"],
+                "variables": list(hydro_result["variables"]),
             })
 
     # Write summary.json to the scenario directory.
@@ -604,6 +647,7 @@ async def download_projection(
     - ``isoraster.tif``     – zone-index raster clipped to the study area  (population / all only)
     - ``pop_urban.tif``     – projected urban population raster             (population / all only)
     - ``pop_rural.tif``     – projected rural population raster             (population / all only)
+    - ``hydrology/``        – clipped hydrology rasters (hydrology / all only)
     - ``summary.json``      – per-area statistics and assumptions
 
     No data is stored on the server.
@@ -616,6 +660,7 @@ async def download_projection(
         "human_emissions",
         "livestock_emissions", "livestock_isodata", "livestock_manure_fractions",
         "livestock_production_systems", "livestock_manure_management",
+        "hydrology",
     }
     if schema_norm not in _allowed_dl:
         raise HTTPException(status_code=422, detail=f"Invalid schema. Allowed: {sorted(_allowed_dl)}")
@@ -671,7 +716,7 @@ async def download_projection(
         is_country_level = all(len(str(g)) <= 3 for g in gids_list)
         alpha3_list = [str(g)[:3] for g in gids_list]
         if schema_norm == "all":
-            schemas_to_generate = ["population", "sanitation", "treatment", "livestock_emissions"]
+            schemas_to_generate = ["population", "sanitation", "treatment", "livestock_emissions", "hydrology"]
         elif schema_norm == "human_emissions":
             schemas_to_generate = ["population", "sanitation", "treatment"]
         else:
@@ -802,6 +847,30 @@ async def download_projection(
                 "animal_heads": ls_result.get("animal_heads", {}),
             })
 
+        # Hydrology inputs — clip to study area using the SSP/year matched model.
+        if "hydrology" in schemas_to_generate and shp_path.is_file():
+            try:
+                hydro_result_dl = generate_hydrology_inputs(
+                    shapefile_path=shp_path,
+                    static_data_dir=static_data_dir,
+                    out_dir=scenario_dir,
+                    ssp=ssp_norm,
+                    year=year,
+                    reference_raster_path=isoraster_path if isoraster_path.is_file() else None,
+                )
+                schema_entries.append({
+                    "schema": "hydrology",
+                    "ssp": ssp_norm,
+                    "year": year,
+                    "model": hydro_result_dl["model"],
+                    "variables": list(hydro_result_dl["variables"]),
+                })
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to generate hydrology inputs: {exc}",
+                )
+
         # Compute per-area statistics.
         projected_df = pd.read_csv(projected_csv_path)
         for _schema in schemas_to_generate:
@@ -874,6 +943,13 @@ async def download_projection(
                 ls_csv_file = ls_dir / ls_csv
                 if ls_csv_file.is_file():
                     zipf.write(ls_csv_file, arcname=f"livestock_emissions/{ls_csv}")
+            # Add projected hydrology/ folder if present.
+            hydrology_out = scenario_dir / "hydrology"
+            if hydrology_out.is_dir():
+                for item in hydrology_out.rglob("*"):
+                    if item.is_file():
+                        rel = item.relative_to(hydrology_out).as_posix()
+                        zipf.write(item, arcname=f"hydrology/{rel}")
 
         zip_buffer.seek(0)
 
@@ -887,7 +963,7 @@ async def download_projection(
 
 
 @router.post("/input/generate")
-async def generate_input_data_package(session_id: str, gids: str, include_livestock: bool = False):
+async def generate_input_data_package(session_id: str, gids: str, include_livestock: bool = False, include_hydrology: bool = False):
     areas = [x.strip() for x in gids.split(",") if x.strip()]
 
     session_dir = _DATA_DIR / session_id
@@ -1027,6 +1103,21 @@ async def generate_input_data_package(session_id: str, gids: str, include_livest
                         session_id, _temp_err,
                     )
 
+            # Clip baseline hydrology rasters to the study area.
+            if include_hydrology and geodata_shp.is_file():
+                try:
+                    generate_hydrology_inputs(
+                        shapefile_path=geodata_shp,
+                        static_data_dir=_STATIC_DIR / "data",
+                        out_dir=session_dir / default_path,
+                        reference_raster_path=_template_raster if _template_raster.is_file() else None,
+                    )
+                except Exception as _hydro_err:
+                    logger.warning(
+                        "Baseline hydrology generation failed for session %s: %s",
+                        session_id, _hydro_err,
+                    )
+
             if include_livestock:
                 os.makedirs(session_dir / schemas_path, exist_ok=True)
                 for schema_name in livestock_schema_files:
@@ -1072,6 +1163,18 @@ async def generate_input_data_package(session_id: str, gids: str, include_livest
             d["livestock"] = {
                 "status": "failed",
                 "error": str(livestock_err),
+            }
+    if include_hydrology:
+        _hydro_dir = session_dir / "baseline" / "hydrology"
+        if _hydro_dir.is_dir():
+            d["hydrology"] = {
+                "status": "written",
+                "hydrology_dir": str(_hydro_dir),
+            }
+        else:
+            d["hydrology"] = {
+                "status": "not_generated",
+                "detail": "Hydrology output directory not found. Check that the shapefile was created successfully.",
             }
     return d
 

@@ -481,6 +481,25 @@ def _generate_animal_isodata(
         for col in ("excr_young", "excr_adult", "mass_young", "mass_adult", "manure_per_mass"):
             df[col] = pd.to_numeric(df[col], errors="coerce").round()
 
+        # Unit corrections for GloWPa formula compatibility:
+        # prev_young / prev_adult are stored as percentages (0–100) in the source data
+        # but GloWPa's animal_emission_excr_mass() uses them directly as fractions (0–1).
+        # Asses are excluded: their source values (0.9) are genuinely below 1 % and
+        # dividing by 100 would produce an implausibly small fraction (0.009).
+        if animal != "asses":
+            df["prev_young"] = pd.to_numeric(df["prev_young"], errors="coerce") / 100
+            df["prev_adult"] = pd.to_numeric(df["prev_adult"], errors="coerce") / 100
+        # manure_per_mass is documented as kg per 1000 kg LW/day but
+        # animal_manure_production() multiplies by mass (kg) with no /1000 divisor.
+        # Not applicable to poultry (chickens, ducks) which have no manure_per_mass pathway.
+        if animal not in ("chickens", "ducks"):
+            df["manure_per_mass"] = df["manure_per_mass"] / 1000
+        # excr_day is a total oocysts/day count, but animal_emission_excr_day() applies
+        # a spurious ×1000 factor copied from the oocysts/gram pathway. Divide here to
+        # compensate. Applies to chickens and ducks only.
+        if animal in ("chickens", "ducks"):
+            df["excr_day"] = pd.to_numeric(df["excr_day"], errors="coerce") / 1000
+
         cols = [
             "iso",
             "frac_young",
