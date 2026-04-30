@@ -62,10 +62,13 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
+# Maps GloWPa SSP labels to available ISIMIP3b codes.
+# Only ssp126 and ssp585 are available in the dataset (ISIMIP3b two-endpoint
+# design). SSP1-2 are bracketed to the low-end; SSP3-5 to the high-end.
 _SSP_CODE_MAP: dict[str, str] = {
     "SSP1": "ssp126",
-    "SSP2": "ssp245",
-    "SSP3": "ssp370",
+    "SSP2": "ssp126",  # nearest available: low-end bracket
+    "SSP3": "ssp585",  # nearest available: high-end bracket
     "SSP4": "ssp585",
     "SSP5": "ssp585",
 }
@@ -98,7 +101,12 @@ _WORLDCLIM_YEAR_PERIODS: list[tuple[int, str]] = [
 # Path helpers
 # ---------------------------------------------------------------------------
 
-def _find_model_dir(static_hydrology_dir: Path, ssp: str, year: int) -> Path:
+def _find_model_dir(
+    static_hydrology_dir: Path,
+    ssp: str,
+    year: int,
+    climate_model: str | None = None,
+) -> Path:
     """Return the best-matching model directory for *ssp* / *year*.
 
     Scans ``static_hydrology_dir/models/`` for directories whose name ends
@@ -113,6 +121,11 @@ def _find_model_dir(static_hydrology_dir: Path, ssp: str, year: int) -> Path:
         SSP identifier string (e.g. ``"SSP1"``).
     year:
         Target projection year (e.g. 2025).
+    climate_model:
+        Optional ISIMIP3b model name prefix (e.g. ``"GFDL-ESM4"``).  When
+        provided only directories whose name starts with
+        ``{climate_model}_`` are considered.  Raises ``ValueError`` when
+        no directory matches.
 
     Returns
     -------
@@ -122,6 +135,8 @@ def _find_model_dir(static_hydrology_dir: Path, ssp: str, year: int) -> Path:
     ------
     FileNotFoundError
         When ``models/`` does not exist or contains no directories.
+    ValueError
+        When *climate_model* is specified but not found.
     """
     ssp_code = _SSP_CODE_MAP.get(ssp.strip().upper(), "ssp126")
     models_dir = static_hydrology_dir / "models"
@@ -129,9 +144,13 @@ def _find_model_dir(static_hydrology_dir: Path, ssp: str, year: int) -> Path:
     if not models_dir.is_dir():
         raise FileNotFoundError(f"Hydrology models directory not found: {models_dir}")
 
+    model_prefix = (climate_model.strip() + "_") if climate_model else None
+
     best: Path | None = None
     for candidate in sorted(models_dir.iterdir()):
         if not candidate.is_dir():
+            continue
+        if model_prefix and not candidate.name.startswith(model_prefix):
             continue
         match = _MODEL_DIR_RE.match(candidate.name)
         if match:
@@ -146,6 +165,16 @@ def _find_model_dir(static_hydrology_dir: Path, ssp: str, year: int) -> Path:
             raise FileNotFoundError(
                 f"No hydrology model directories found under {models_dir}."
             )
+        if climate_model:
+            # Caller specified a model that wasn't found — raise a descriptive error.
+            available_names = sorted(
+                {_MODEL_DIR_RE.match(d.name).group(0).rsplit("_", 3)[0]  # model prefix
+                 for d in available if _MODEL_DIR_RE.match(d.name)}
+            )
+            raise ValueError(
+                f"Climate model '{climate_model}' not found for SSP={ssp} year={year}. "
+                f"Available models: {available_names or [d.name for d in available]}"
+            )
         best = available[0]
         logger.warning(
             "No hydrology model found for SSP=%s year=%d; falling back to '%s'.",
@@ -157,13 +186,24 @@ def _find_model_dir(static_hydrology_dir: Path, ssp: str, year: int) -> Path:
     return best
 
 
-def _baseline_model_dir(static_hydrology_dir: Path) -> Path:
+def _baseline_model_dir(
+    static_hydrology_dir: Path,
+    climate_model: str | None = None,
+) -> Path:
     """Return the first available model directory (used for baseline generation).
+
+    Parameters
+    ----------
+    climate_model:
+        Optional model name prefix.  When provided, only directories matching
+        that prefix are returned.  Raises ``ValueError`` when not found.
 
     Raises
     ------
     FileNotFoundError
         When no model directories exist.
+    ValueError
+        When *climate_model* is specified but not found.
     """
     models_dir = static_hydrology_dir / "models"
     if not models_dir.is_dir():
@@ -174,6 +214,21 @@ def _baseline_model_dir(static_hydrology_dir: Path) -> Path:
         raise FileNotFoundError(
             f"No hydrology model directories found under {models_dir}."
         )
+
+    if climate_model:
+        model_prefix = climate_model.strip() + "_"
+        matched = [d for d in available if d.name.startswith(model_prefix)]
+        if not matched:
+            available_names = sorted(
+                {_MODEL_DIR_RE.match(d.name).group(0).rsplit("_", 3)[0]
+                 for d in available if _MODEL_DIR_RE.match(d.name)}
+            )
+            raise ValueError(
+                f"Climate model '{climate_model}' not found. "
+                f"Available models: {available_names or [d.name for d in available]}"
+            )
+        return matched[0]
+
     return available[0]
 
 
@@ -224,6 +279,10 @@ def _clip_raster(src_path: Path, shapes: list, out_path: Path, reference_path: P
             crop=True,
             filled=True,
             nodata=nodata,
+            all_touched=True,  # include any cell that touches the polygon, not just
+                               # those whose centre falls inside. Critical for sparse
+                               # river grids at coarse resolution (0.5°) where border
+                               # and coastal cells would otherwise be silently dropped.
         )
 
         out_meta = src.meta.copy()
@@ -468,6 +527,47 @@ def _generate_river_temperature_fallback(
 # Public API
 # ---------------------------------------------------------------------------
 
+def list_available_models(
+    static_data_dir: str | Path,
+    ssp: str | None = None,
+    year: int | None = None,
+) -> list[str]:
+    """Return the unique climate model base names available under ``static_data_dir/hydrology/models/``.
+
+    Optionally filtered by *ssp* and *year* so only models with data for that
+    scenario are returned.
+    """
+    models_dir = Path(static_data_dir) / "hydrology" / "models"
+    if not models_dir.is_dir():
+        return []
+
+    ssp_code: str | None = None
+    if ssp:
+        ssp_code = _SSP_CODE_MAP.get(ssp.strip().upper())
+
+    seen: set[str] = set()
+    names: list[str] = []
+    for candidate in sorted(models_dir.iterdir()):
+        if not candidate.is_dir():
+            continue
+        match = _MODEL_DIR_RE.match(candidate.name)
+        if not match:
+            continue
+        dir_ssp = match.group(1)
+        start_yr, end_yr = int(match.group(2)), int(match.group(3))
+        if ssp_code is not None and dir_ssp != ssp_code:
+            continue
+        if year is not None and not (start_yr <= year <= end_yr):
+            continue
+        # Model base name = everything before _{ssp_code}_{start}_{end}
+        suffix = f"_{dir_ssp}_{match.group(2)}_{match.group(3)}"
+        model_base = candidate.name[: -len(suffix)]
+        if model_base not in seen:
+            seen.add(model_base)
+            names.append(model_base)
+    return names
+
+
 def generate_hydrology_inputs(
     shapefile_path: str | Path,
     static_data_dir: str | Path,
@@ -475,6 +575,7 @@ def generate_hydrology_inputs(
     ssp: str | None = None,
     year: int | None = None,
     reference_raster_path: str | Path | None = None,
+    climate_model: str | None = None,
 ) -> dict:
     """Clip hydrology inputs to the study area and write to ``out_dir/hydrology/``.
 
@@ -514,9 +615,9 @@ def generate_hydrology_inputs(
 
     # Resolve model directory.
     if ssp is not None and year is not None:
-        model_dir = _find_model_dir(hydrology_static_dir, ssp, year)
+        model_dir = _find_model_dir(hydrology_static_dir, ssp, year, climate_model=climate_model)
     else:
-        model_dir = _baseline_model_dir(hydrology_static_dir)
+        model_dir = _baseline_model_dir(hydrology_static_dir, climate_model=climate_model)
 
     logger.info("Generating hydrology inputs from model '%s'.", model_dir.name)
 
@@ -613,6 +714,53 @@ def generate_hydrology_inputs(
             result["doc"] = str(out_doc)
         except Exception as exc:
             logger.warning("Failed to clip DOC raster: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Write assumptions.csv describing the data sources used
+    # ------------------------------------------------------------------
+    try:
+        ssp_requested = ssp.strip().upper() if ssp else "baseline"
+        ssp_code_used = _SSP_CODE_MAP.get(ssp_requested, "ssp126") if ssp else "baseline"
+        river_temp_source = result.get("river_temperature_source", "model")
+
+        assumptions_rows = [
+            {
+                "id": "hydrology_model",
+                "scenario": ssp_requested,
+                "year": str(year) if year else "baseline",
+                "admin_level": "all",
+                "pathogen": "all",
+                "assumption": (
+                    f"Hydrology inputs derived from ISIMIP3b climate model '{model_dir.name}'. "
+                    f"Requested SSP '{ssp_requested}' mapped to available scenario '{ssp_code_used}' "
+                    f"(ISIMIP3b provides ssp126 and ssp585 only)."
+                ),
+            },
+            {
+                "id": "hydrology_river_temperature",
+                "scenario": ssp_requested,
+                "year": str(year) if year else "baseline",
+                "admin_level": "all",
+                "pathogen": "all",
+                "assumption": (
+                    "River temperature derived from WorldClim 2.5 arcmin surface temperature "
+                    "(BIO1/BIO5/BIO6) using a sinusoidal monthly model."
+                    if river_temp_source == "worldclim_fallback"
+                    else f"River temperature derived from climate model '{model_dir.name}'."
+                ),
+            },
+        ]
+
+        import csv
+        assumptions_path = out_hydrology_dir / "assumptions.csv"
+        fieldnames = ["id", "scenario", "year", "admin_level", "pathogen", "assumption"]
+        with open(assumptions_path, "w", newline="", encoding="utf-8") as fh:
+            writer = csv.DictWriter(fh, fieldnames=fieldnames, delimiter=";")
+            writer.writeheader()
+            writer.writerows(assumptions_rows)
+        result["assumptions_csv"] = str(assumptions_path)
+    except Exception as exc:
+        logger.warning("Failed to write hydrology assumptions.csv: %s", exc)
 
     logger.info(
         "Hydrology inputs written to '%s' (variables: %s).",

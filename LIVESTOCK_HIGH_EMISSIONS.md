@@ -4,7 +4,8 @@
 
 When the livestock module is enabled, GloWPa produces land emission values
 several orders of magnitude higher than human emissions for all case studies.
-Two compounding unit mismatches in the animal isodata files cause this.
+Three compounding unit mismatches in the animal isodata files cause this.
+Bugs 1 and 2 affect all non-poultry livestock; Bug 3 affects chickens and ducks only.
 
 ---
 
@@ -79,27 +80,79 @@ The formula multiplies `mass` (kg) by `manure_per_mass` directly. There is **no 
 
 ---
 
+### Bug 3 — Spurious ×1000 factor in the poultry emission formula
+
+Chickens and ducks use a different emission pathway in `R/animal.R`: instead of
+manure mass × excretion concentration, they use a pre-integrated daily excretion
+value (`excr_day`).
+
+**GloWPa documentation** (`README`, section *Livestock Animal Isodata*):
+
+| Column | Unit | Applies to |
+|---|---|---|
+| `excr_day` | **particles day⁻¹** | chickens, ducks only |
+
+`particles day⁻¹` is a **total** count of oocysts per animal per day — not a
+concentration per gram of manure.
+
+**GloWPa model formula** (`R/animal.R`):
+```r
+animal_emission_excr_day <- function(prev, excr_day) {
+  # factor 1000 is added to go from oocysts per gram to oocysts per kilogram
+  # factor 365 is added to compute the yearly emissions
+  animal_emission <- prev * excr_day * 365 * 1000
+  return(animal_emission)
+}
+```
+The comment says "oocysts per gram → oocysts per kilogram", which is only
+meaningful when the excretion value is a concentration (oocysts/g). Because
+`excr_day` is a total daily count (oocysts/day), the ×1000 has no physical
+basis — it is a copy-paste artefact from the non-poultry function.
+
+**Back-of-envelope check — chickens (iso=3)**:
+
+| | formula | result |
+|---|---|---|
+| As coded (bug) | 0.147 × 5,823,759 × 365 × 1000 | **3.1 × 10¹¹ oocysts/year/bird** |
+| Correct | 0.147 × 5,823,759 × 365 | **3.1 × 10⁸ oocysts/year/bird** |
+
+3.1 × 10⁸ is consistent with literature-reported Cryptosporidium loads from
+chickens; 3.1 × 10¹¹ is three orders of magnitude too high.
+
+**Effect: 1000× overestimate** of pathogen emissions from chickens and ducks.
+
+---
+
 ### Combined effect
 
-Both bugs multiply together:
+For non-poultry livestock, Bugs 1 and 2 multiply together:
 
 $$\text{emission}_\text{actual} = \text{emission}_\text{correct} \times 100 \times 1000 = \text{emission}_\text{correct} \times 100{,}000$$
 
-This matches the observed output: livestock land emissions are ~57,000–100,000× higher
-than expected human emissions.
+For poultry (chickens, ducks), only Bug 3 applies:
+
+$$\text{emission}_\text{actual} = \text{emission}_\text{correct} \times 1000$$
+
+This is consistent with the observed output: all livestock emissions are vastly
+overestimated, and poultry emissions dominate because they do not benefit from
+the partial cancellation that would occur if the non-poultry bugs were fixed alone.
 
 ---
 
 ## Proposed Fix — Data Preparation Phase
 
 The fix should be applied at the point where animal isodata is generated,
-before it is written to disk. Two corrections are needed:
+before it is written to disk. Three corrections are needed:
 
 1. Divide `prev_young` and `prev_adult` by **100** to convert from percentage
    scale to the fraction scale (0–1) that GloWPa's model formula expects.
+   *(Applies to all animals except asses — see note below.)*
 2. Divide `manure_per_mass` by **1000** to convert from the documented unit
    (kg per 1000 kg live weight per day) to the unit implicitly assumed by
    GloWPa's `animal_manure_production()` formula (kg per kg live weight per day).
+   *(Applies to all non-poultry animals.)*
+3. Divide `excr_day` by **1000** to compensate for the spurious ×1000 factor
+   in `animal_emission_excr_day()`. *(Applies to chickens and ducks only.)*
 
 Applying these corrections at data generation time ensures all subsequently
 created case studies have the right values.
@@ -115,7 +168,9 @@ values. Those files need to be corrected as well — either by:
 1. **Re-running data preparation** for the affected case studies (cleanest option),
    or
 2. **Applying the same factor corrections directly to the existing CSVs**:
-   divide `prev_young` and `prev_adult` by 100, and `manure_per_mass` by 1000.
+   - divide `prev_young` and `prev_adult` by 100 (all animals except asses),
+   - divide `manure_per_mass` by 1000 (all non-poultry animals),
+   - divide `excr_day` by 1000 (chickens and ducks only).
 
 Note: `asses` may already have near-correct prevalence values
 (`prev_young = 0.9`, `prev_adult = 0.9`) because their true prevalence is
@@ -127,11 +182,14 @@ needed.
 
 ## Upstream Issue
 
-Both discrepancies originate in the GloWPa R package:
+All three discrepancies originate in the GloWPa R package:
 
 - The `vermeulen_2017/animals.csv` source data stores prevalence in % scale.
 - `animal_manure_production()` lacks the `/1000` divisor documented for
   `manure_per_mass`.
+- `animal_emission_excr_day()` contains a spurious `× 1000` factor that is
+  only appropriate for excretion values in oocysts/gram, not for the total
+  oocysts/day values that `excr_day` represents.
 
 It is worth reporting these to the GloWPa maintainers
 (<https://git.wur.nl/glowpa/glowpa-r/-/issues>) so the package itself can be
