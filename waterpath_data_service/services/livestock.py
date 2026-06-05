@@ -225,6 +225,63 @@ def _clip_raster_to_zone_grid(
     return dst
 
 
+def _clip_count_raster_to_zone_grid(
+    source_raster: Path,
+    zone_profile: rasterio.profiles.Profile,
+    source_nodata: float | None = None,
+) -> np.ndarray:
+    """Reproject/clip a *count-per-pixel* raster to the zone grid.
+
+    Unlike :func:`_clip_raster_to_zone_grid` (which expects the source to be
+    a density, e.g. heads/km²), this helper handles rasters whose pixel
+    values are absolute counts for the source pixel — e.g. the GLW3/4 2015
+    duck raster ``5_Dk_2015_Da.tif`` (heads/pixel).
+
+    Bilinearly resampling such a raster directly would re-use the per-source
+    -pixel value at every overlapping destination pixel, inflating or
+    deflating totals by roughly the squared ratio of pixel sizes when the
+    grids differ.  To preserve areal totals the source is converted to a
+    density (counts / source-pixel-area-km²), resampled with bilinear, then
+    multiplied by the destination pixel area (km²).  The returned array
+    therefore has the same units (heads/destination-pixel) and dtype that
+    callers of :func:`_clip_raster_to_zone_grid` produce after multiplying
+    its output by ``_pixel_area_km2``.
+    """
+    with rasterio.open(source_raster) as src:
+        src_counts = src.read(1).astype(np.float32)
+        nd = source_nodata if source_nodata is not None else src.nodata
+        if nd is None:
+            mask = src_counts < 0
+        else:
+            mask = src_counts == nd
+        src_area = _pixel_area_km2(src.profile)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            src_density = np.where(src_area > 0, src_counts / src_area, np.nan)
+        src_density = np.where(mask, np.nan, src_density).astype(np.float32)
+
+        dst_density = np.full(
+            (zone_profile["height"], zone_profile["width"]),
+            np.nan,
+            dtype=np.float32,
+        )
+        reproject(
+            source=src_density,
+            destination=dst_density,
+            src_transform=src.transform,
+            src_crs=src.crs,
+            src_nodata=np.nan,
+            dst_transform=zone_profile["transform"],
+            dst_crs=zone_profile["crs"],
+            dst_nodata=np.nan,
+            resampling=Resampling.bilinear,
+        )
+    # Bilinear interpolation at nodata boundaries can still produce small
+    # negative artefacts; clamp them because animal head counts must be >= 0.
+    dst_density = np.where(dst_density < 0, np.nan, dst_density)
+    dst_area = _pixel_area_km2(zone_profile)
+    return (dst_density * dst_area).astype(np.float32)
+
+
 def _write_float_raster(arr: np.ndarray, zone_profile: rasterio.profiles.Profile, out_path: Path) -> None:
     """Write a float32 array to a GeoTIFF using the zone grid CRS/transform."""
     profile = zone_profile.copy()
@@ -481,25 +538,6 @@ def _generate_animal_isodata(
         for col in ("excr_young", "excr_adult", "mass_young", "mass_adult", "manure_per_mass"):
             df[col] = pd.to_numeric(df[col], errors="coerce").round()
 
-        # Unit corrections for GloWPa formula compatibility:
-        # prev_young / prev_adult are stored as percentages (0–100) in the source data
-        # but GloWPa's animal_emission_excr_mass() uses them directly as fractions (0–1).
-        # Asses are excluded: their source values (0.9) are genuinely below 1 % and
-        # dividing by 100 would produce an implausibly small fraction (0.009).
-        if animal != "asses":
-            df["prev_young"] = pd.to_numeric(df["prev_young"], errors="coerce") / 100
-            df["prev_adult"] = pd.to_numeric(df["prev_adult"], errors="coerce") / 100
-        # manure_per_mass is documented as kg per 1000 kg LW/day but
-        # animal_manure_production() multiplies by mass (kg) with no /1000 divisor.
-        # Not applicable to poultry (chickens, ducks) which have no manure_per_mass pathway.
-        if animal not in ("chickens", "ducks"):
-            df["manure_per_mass"] = df["manure_per_mass"] / 1000
-        # excr_day is a total oocysts/day count, but animal_emission_excr_day() applies
-        # a spurious ×1000 factor copied from the oocysts/gram pathway. Divide here to
-        # compensate. Applies to chickens and ducks only.
-        if animal in ("chickens", "ducks"):
-            df["excr_day"] = pd.to_numeric(df["excr_day"], errors="coerce") / 1000
-
         cols = [
             "iso",
             "frac_young",
@@ -680,11 +718,13 @@ def _generate_animal_heads_rasters(
         created[animal] = str(out_path)
         logger.debug("Written %s", out_path)
 
-    # Ducks: GLW4 2015 stores total heads/pixel already — only scale 2015→2020
+    # Ducks: GLW4 2015 stores total heads/pixel already — only scale 2015→2020.
+    # Use the count-aware resampler so totals are preserved when the source
+    # (~10 km) and zone grids differ.
     duck_2015_total = _fao_total("Ducks", 2015)
     duck_2020_total = _fao_total("Ducks", 2020)
     duck_scale = duck_2020_total / duck_2015_total if duck_2015_total > 0 else 1.0
-    duck_arr = _clip_raster_to_zone_grid(glw4_2015_dir / "5_Dk_2015_Da.tif", zone_profile)
+    duck_arr = _clip_count_raster_to_zone_grid(glw4_2015_dir / "5_Dk_2015_Da.tif", zone_profile)
     duck_arr = np.where(np.isfinite(duck_arr), duck_arr * duck_scale, np.nan).astype(np.float32)
     duck_arr[~valid_mask] = np.nan
     out_path = animals_dir / "ducks_heads.tif"

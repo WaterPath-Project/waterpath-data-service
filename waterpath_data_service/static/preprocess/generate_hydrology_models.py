@@ -128,6 +128,7 @@ def _write_tif(data: np.ndarray, output_path: Path) -> None:
         count=1,
         dtype="float32",
         crs="EPSG:4326",
+        transform=transform,
         nodata=NODATA,
     ) as dst:
         dst.write(out, 1)

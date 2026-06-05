@@ -102,6 +102,31 @@ async def fetch_treatment_fractions_csv(alpha3_list: list[str]) -> pd.DataFrame:
     df = pd.read_csv(io.StringIO(r.text))
     df = df[df["alpha3"].isin(alpha3_list)].copy()
 
+    # Ensure FractionQuaternarytreatment column exists.
+    col_lower = {c.lower(): c for c in df.columns}
+    # Normalise any existing variant of the column name to the canonical spelling.
+    for variant in ("fractionquartenarytreatment", "fractionquarternarytreatment"):
+        if variant in col_lower and col_lower[variant] != "FractionQuaternarytreatment":
+            df = df.rename(columns={col_lower[variant]: "FractionQuaternarytreatment"})
+            col_lower = {c.lower(): c for c in df.columns}
+    if "fractionquaternarytreatment" not in col_lower:
+        primary   = col_lower.get("fractionprimarytreatment")
+        secondary = col_lower.get("fractionsecondarytreatment")
+        tertiary  = col_lower.get("fractiontertiarytreatment")
+        if primary and secondary and tertiary:
+            t_vals = pd.to_numeric(df[tertiary], errors="coerce").fillna(0)
+            residual = (
+                1.0
+                - pd.to_numeric(df[primary],   errors="coerce").fillna(0)
+                - pd.to_numeric(df[secondary], errors="coerce").fillna(0)
+                - t_vals
+            ).clip(lower=0.0)
+            # Quaternary is a polishing step that only follows tertiary.
+            # When T = 0 there is no quaternary; the residual is untreated.
+            df["FractionQuaternarytreatment"] = residual.where(t_vals > 0, other=0.0)
+        else:
+            df["FractionQuaternarytreatment"] = 0.0
+
     # Add fallback rows for countries absent from the remote dataset so the
     # returned DataFrame always contains one row per requested alpha3.
     missing = set(alpha3_list) - set(df["alpha3"])
@@ -155,6 +180,31 @@ async def fetch_treatment_future_csv(
     df = df[df[alpha3_col].isin(alpha3_list)].copy()
     if alpha3_col != "alpha3":
         df = df.rename(columns={alpha3_col: "alpha3"})
+
+    # Ensure FractionQuaternarytreatment column exists.
+    col_lower = {c.lower(): c for c in df.columns}
+    # Normalise any existing variant of the column name to the canonical spelling.
+    for variant in ("fractionquartenarytreatment", "fractionquarternarytreatment"):
+        if variant in col_lower and col_lower[variant] != "FractionQuaternarytreatment":
+            df = df.rename(columns={col_lower[variant]: "FractionQuaternarytreatment"})
+            col_lower = {c.lower(): c for c in df.columns}
+    if "fractionquaternarytreatment" not in col_lower:
+        primary   = col_lower.get("fractionprimarytreatment")
+        secondary = col_lower.get("fractionsecondarytreatment")
+        tertiary  = col_lower.get("fractiontertiarytreatment")
+        if primary and secondary and tertiary:
+            t_vals = pd.to_numeric(df[tertiary], errors="coerce").fillna(0)
+            residual = (
+                1.0
+                - pd.to_numeric(df[primary],   errors="coerce").fillna(0)
+                - pd.to_numeric(df[secondary], errors="coerce").fillna(0)
+                - t_vals
+            ).clip(lower=0.0)
+            # Quaternary is a polishing step that only follows tertiary.
+            # When T = 0 there is no quaternary; the residual is untreated.
+            df["FractionQuaternarytreatment"] = residual.where(t_vals > 0, other=0.0)
+        else:
+            df["FractionQuaternarytreatment"] = 0.0
 
     drop_cols = [c for c in [scenario_col, year_col] if c in df.columns]
     return df.drop(columns=drop_cols)

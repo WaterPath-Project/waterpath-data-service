@@ -29,7 +29,10 @@ print('pygadm patched' if fixed != src else 'WARNING: pattern not found') \
 
 # Copying actuall application
 COPY . /app/src/
-RUN --mount=type=cache,target=/tmp/poetry_cache poetry install --only main
+# Install the local package without the BuildKit cache mount so that any
+# change to the source tree always produces a fresh layer and is never
+# served from the persistent poetry cache.
+RUN poetry install --only main
 
 CMD ["/usr/local/bin/python", "-m", "waterpath_data_service"]
 

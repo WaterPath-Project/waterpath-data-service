@@ -273,17 +273,46 @@ def _clip_raster(src_path: Path, shapes: list, out_path: Path, reference_path: P
         else:
             clip_shapes = shapes
 
-        clipped, clip_transform = rasterio.mask.mask(
-            src,
-            clip_shapes,
-            crop=True,
-            filled=True,
-            nodata=nodata,
-            all_touched=True,  # include any cell that touches the polygon, not just
-                               # those whose centre falls inside. Critical for sparse
-                               # river grids at coarse resolution (0.5°) where border
-                               # and coastal cells would otherwise be silently dropped.
-        )
+        # Some legacy TIFs (and early Python-generated ones) lack a geotransform,
+        # causing rasterio to return the identity matrix.  For the known global
+        # 0.5° grids (360 rows × 720 cols) substitute the correct transform so
+        # that geographic clip coordinates align with pixels.
+        _identity = rasterio.transform.IDENTITY
+        if src.shape == (360, 720) and src.transform == _identity:
+            from rasterio.transform import from_origin as _from_origin
+            from rasterio.io import MemoryFile as _MemoryFile
+            logger.debug(
+                "Identity transform detected in %s; patching to 0.5° global grid.",
+                src_path,
+            )
+            _fixed_transform = _from_origin(-180.0, 90.0, 0.5, 0.5)
+            _profile = src.profile.copy()
+            _profile.update(crs=src_crs, transform=_fixed_transform)
+            _data = src.read()
+            with _MemoryFile() as _memfile:
+                with _memfile.open(**_profile) as _mem_ds:
+                    _mem_ds.write(_data)
+                with _memfile.open() as _mem_ds:
+                    clipped, clip_transform = rasterio.mask.mask(
+                        _mem_ds,
+                        clip_shapes,
+                        crop=True,
+                        filled=True,
+                        nodata=nodata,
+                        all_touched=True,
+                    )
+        else:
+            clipped, clip_transform = rasterio.mask.mask(
+                src,
+                clip_shapes,
+                crop=True,
+                filled=True,
+                nodata=nodata,
+                all_touched=True,  # include any cell that touches the polygon, not just
+                                   # those whose centre falls inside. Critical for sparse
+                                   # river grids at coarse resolution (0.5°) where border
+                                   # and coastal cells would otherwise be silently dropped.
+            )
 
         out_meta = src.meta.copy()
         out_meta.update(

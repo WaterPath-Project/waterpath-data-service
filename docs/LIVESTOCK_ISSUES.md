@@ -92,3 +92,67 @@ raw = max(glw4_native_res, min(0.5, diagonal / 100.0))
 **Affected case studies:** Any study area at sub-district scale (typically
 admin level 4 or finer) where the bounding box is smaller than ~0.33° in
 either longitude or latitude extent.
+
+---
+
+### 6. Proxy Species Over-Estimated in Countries with Atypical Species Mixes (e.g. Uganda)
+
+**Issue:**
+Horses, donkeys, mules, asses, and camels have no dedicated GLW4 raster.
+Previously they were distributed by scaling the combined sheep+goat spatial
+proxy by a single *global* ratio:
+
+```
+species_heads_pixel = (sheep+goat)_pixel × (global FAOSTAT species total / global FAOSTAT sheep+goat total)
+```
+
+This assumes every country has the same camel-to-sheep-goat ratio as the world
+average, which is badly wrong for many countries.  Uganda illustrates the
+problem:
+
+| Species | Uganda census (2016) | Old estimate | Error factor |
+|---------|---------------------|--------------|-------------|
+| Camels | 12,000 | ~440,000 | ~36× over |
+| Donkeys | 63,000 | ~450,000 | ~7× over |
+
+Uganda has ~21 million sheep+goats — one of the larger national totals in
+Africa — so multiplying by the global camel/sheep-goat ratio (≈ 0.02) produced
+a vastly inflated camel count.  The error is proportional to how much a country
+deviates from the global species mix.
+
+For ducks, the old code applied a single global 2015→2020 FAOSTAT growth factor,
+ignoring national trends.
+
+**Fix:**
+A new `_fao_country_total(fao, iso3, item_name, year)` helper looks up
+per-country FAOSTAT 2020 national totals by ISO3 code.
+
+*Proxy species (horses, donkeys, asses, mules, camels):*
+- For each country in the session, the total sheep+goat heads within that
+  country's zone are summed from the proxy raster.
+- A per-country scale factor is derived: `FAOSTAT_national_total / proxy_pixel_sum`.
+- The proxy pixels for that country are multiplied by this country-specific scale
+  so the spatial sum exactly matches the FAOSTAT 2020 national count.
+- Countries with no FAOSTAT data fall back to the old global ratio (with a
+  warning logged).
+
+*Ducks:*
+- Each country's GLW4 2015 pixel sum is computed and used as the 2015 baseline.
+- The per-country scale is: `FAOSTAT_2020_national / GLW4_2015_pixel_sum`.
+- Countries with no FAOSTAT 2020 data fall back to the global 2015→2020 ratio.
+
+The spatial *pattern* within each country is still taken from the proxy/GLW4
+raster; only the national *total* is constrained to match FAOSTAT, which is the
+same approach GLW4 itself uses for its directly modelled species.
+
+**GLW4 direct species (cattle, chickens, goats, pigs, sheep, buffaloes):**
+No change required.  GLW4 2020 is already calibrated per country, and observed
+differences from the Uganda 2016 census are within the 4-year temporal gap plus
+model uncertainty.
+
+**Relevant code changes:**
+- `waterpath_data_service/services/livestock.py`
+  - New function: `_fao_country_total()`
+  - Updated function: `_generate_animal_heads_rasters()` — new parameters
+    `zone_idx` and `mapping`; per-country scaling loop for both ducks and proxy
+    species.

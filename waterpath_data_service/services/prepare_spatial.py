@@ -371,11 +371,16 @@ def _resample_pop_raster(
 ) -> np.ndarray:
     """Resample any population-count raster to the target grid.
 
-    Converts source counts → density (pop / km²) → average resample →
-    counts per target cell.  ``Resampling.average`` is used instead of
-    bilinear because it skips NaN source pixels when computing each
-    destination pixel; bilinear would propagate a single nodata/edge NaN
-    to all four neighbouring destination pixels and blank out the domain.
+    Converts source counts → density (pop / km²) → area-weighted average
+    resample → counts per target cell.  Source nodata pixels (e.g. ocean,
+    out-of-extent) are treated as **zero population**, not NaN.  This is
+    essential for total preservation: ``Resampling.average`` *skips* NaN
+    source pixels, which would inflate the per-destination-cell density
+    (mean over only the non-NaN subset) and then over-count people when
+    multiplied by the full destination cell area.  Zero-filling makes the
+    average area-weighted over the full destination footprint and therefore
+    preserves total population (sum_dst ≈ sum_src) to within boundary
+    rounding.
     """
     dst_xmin, dst_ymin, dst_xmax, dst_ymax = rasterio.transform.array_bounds(
         dst_height, dst_width, dst_transform
@@ -385,9 +390,7 @@ def _resample_pop_raster(
         window = window_from_bounds(dst_xmin, dst_ymin, dst_xmax, dst_ymax, src.transform)
         # boundless=True ensures the read array always matches the window
         # dimensions, even when the window extends outside the source raster.
-        # fill_value=0 keeps uninhabited out-of-extent cells as zero population
-        # (they will be masked to NaN by the nodata step below or via nan
-        # propagation in the density conversion).
+        # fill_value=0 keeps out-of-extent cells as zero population.
         src_data = src.read(
             1, window=window, boundless=True, fill_value=0
         ).astype(np.float32)
@@ -396,31 +399,36 @@ def _resample_pop_raster(
 
     if src_nodata is not None:
         # Use a tolerance-based comparison (float equality is unreliable) and
-        # also catch common large-negative sentinel values.
+        # also catch common large-negative sentinel values.  Set them to 0,
+        # NOT NaN — see docstring.
         nodata_mask = (
             np.isclose(src_data, float(src_nodata), rtol=1e-5, atol=0)
             | (src_data < -1e10)
         )
-        src_data[nodata_mask] = np.nan
+        src_data[nodata_mask] = 0.0
+
+    # Defensive: any remaining non-finite values (shouldn't occur for these
+    # rasters, but cheap to handle) are also zero population.
+    src_data[~np.isfinite(src_data)] = 0.0
 
     src_h, src_w = src_data.shape
     src_cell_area = _cell_area_km2(src_transform, src_h, src_w)
     with np.errstate(invalid="ignore", divide="ignore"):
-        src_density = np.where(src_cell_area > 0, src_data / src_cell_area, np.nan)
+        src_density = np.where(src_cell_area > 0, src_data / src_cell_area, 0.0)
 
     density_resampled = np.full((dst_height, dst_width), np.nan, dtype=np.float32)
     reproject(
-        source=src_density,
+        source=src_density.astype(np.float32),
         destination=density_resampled,
         src_transform=src_transform,
         src_crs=crs,
         dst_transform=dst_transform,
         dst_crs=crs,
-        # Resampling.average skips NaN source pixels when computing each dest
-        # pixel, so a single nodata/edge NaN in the source does NOT propagate
-        # to destroy its four neighbouring dest pixels (bilinear would do that).
+        # No NaN sentinels in src_density → ``average`` becomes a proper
+        # area-weighted mean over the full destination footprint, which
+        # preserves totals when later multiplied by destination cell area.
         resampling=Resampling.average,
-        src_nodata=np.nan,
+        src_nodata=None,
         dst_nodata=np.nan,
     )
 
