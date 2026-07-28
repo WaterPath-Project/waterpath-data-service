@@ -48,6 +48,13 @@ _LIVESTOCK_FUTURE_URL = (
     "https://raw.githubusercontent.com/WaterPath-Project/waterpath-data"
     "/refs/heads/main/livestock_projections/data/livestock_future.csv"
 )
+# Country-level SSP GDP-per-capita projections used to scale the Kummu baseline
+# grid for the QMRA drinking-water map. See static/gdp/scripts/prepare.py for
+# source downloads, anchoring methodology, and generation of the hosted file.
+GDP_FUTURE_URL = (
+    "https://raw.githubusercontent.com/WaterPath-Project/waterpath-data"
+    "/refs/heads/main/gdp/data/gdp_future.csv"
+)
 
 _ASSUMPTIONS_URLS: dict[str, str] = {
     "urbanization": (
@@ -69,6 +76,10 @@ _ASSUMPTIONS_URLS: dict[str, str] = {
     "sanitation": (
         "https://raw.githubusercontent.com/WaterPath-Project/waterpath-data"
         "/refs/heads/main/jmp_household_surveys/data/assumptions.csv"
+    ),
+    "qmra": (
+        "https://raw.githubusercontent.com/WaterPath-Project/waterpath-data"
+        "/refs/heads/main/gdp/data/assumptions.csv"
     ),
 }
 
@@ -246,6 +257,48 @@ async def fetch_livestock_future_csv(
 
     drop_cols = [c for c in [scenario_col, year_col] if c in df.columns]
     return df.drop(columns=drop_cols)
+
+
+async def fetch_gdp_future_csv(
+    alpha3_list: list[str],
+    ssp: str,
+    years: list[int],
+) -> pd.DataFrame:
+    """Fetch country-level SSP GDP-per-capita projections from ``gdp_future.csv``.
+
+    Filters to *alpha3_list*, *ssp*, and the requested *years* (typically the
+    anchor base year plus the target year, so a growth factor can be derived).
+
+    Returns a long-format DataFrame with columns ``alpha3``, ``year`` and
+    ``gdp_per_capita``.  Countries or years absent from the source are simply
+    omitted; callers fall back to a growth factor of 1.0.
+    """
+    async with httpx.AsyncClient() as client:
+        r = await client.get(GDP_FUTURE_URL, timeout=30)
+        r.raise_for_status()
+    df = pd.read_csv(io.StringIO(r.text))
+
+    alpha3_col = next((c for c in df.columns if c.lower() == "alpha3"), None)
+    scenario_col = next((c for c in df.columns if c.lower() in ("scenario", "ssp")), None)
+    year_col = next((c for c in df.columns if c.lower() == "year"), None)
+    gdp_col = next(
+        (c for c in df.columns if c.lower() in ("gdp_per_capita", "gdppercapita", "gdp")),
+        None,
+    )
+    if alpha3_col is None or year_col is None or gdp_col is None:
+        raise ValueError(
+            "gdp_future.csv must contain alpha3, year and gdp_per_capita columns."
+        )
+
+    ssp_norm = ssp.strip().upper()
+    if scenario_col is not None:
+        df = df[df[scenario_col].astype(str).str.strip().str.upper() == ssp_norm]
+    df[year_col] = pd.to_numeric(df[year_col], errors="coerce")
+    df = df[df[year_col].isin(years)]
+    df = df[df[alpha3_col].isin(alpha3_list)].copy()
+
+    df = df.rename(columns={alpha3_col: "alpha3", year_col: "year", gdp_col: "gdp_per_capita"})
+    return df[["alpha3", "year", "gdp_per_capita"]]
 
 
 async def fetch_sanitation_projection(

@@ -55,7 +55,7 @@ waterpath_data_service
 ├── tests  # Tests for project.
 └── web  # Package contains web server. Handlers, startup config.
     ├── api  # Package with all handlers.
-    │   └── router.py  # Main router.
+    │   └── router.py  # Main router.
     ├── application.py  # FastAPI application configuration.
     └── lifespan.py  # Contains actions to perform on startup and shutdown.
 ```

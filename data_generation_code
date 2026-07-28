@@ -1,0 +1,58 @@
+Incomegroups --> World Bank
+
+Gridcells of a GDP grid calssified (5 = traditional, 6 = conventional 1, 7 = conventional 2, 8 = advanced).
+ 
+
+library(terra);library(sf);library(dplyr)
+
+ 
+
+# Reclassify gdp to wb group
+
+# this uses gdp at the reported level from (https://www.nature.com/articles/s41597-025-04487-x / https://zenodo.org/records/16741980)
+
+# also available at other levels and admin 2 gridded
+
+isoraster <- rast("Inputs/Inputs DB/Population/isoraster_new/gpw_v4_national_identifier_grid_rev11_30_min.asc")
+
+gdp.adm1 <- st_read("qmra inputs/Global/polyg_adm1_gdp_perCapita_1990_2022.gpkg")
+
+gdp.adm2 <- st_read("Inputs/Inputs QMRA/Treatment/GDP/polyg_adm2_gdp_perCapita_1990_2022.gpkg")
+
+ 
+
+gdp.adm1 <- gdp.adm2
+
+ 
+
+gdp.adm1.2015 <- gdp.adm1['X2015']
+
+ 
+
+gdp.adm1.2015 <- gdp.adm1.2015 %>%
+
+  mutate(X2015 =
+
+           case_when(
+
+             X2015 < 1045 ~ 5,
+
+             X2015 < 4126 ~ 6,
+
+             X2015 < 12736 ~ 7,
+
+             X2015 > 12736 ~ 8
+
+           )
+
+  )
+
+ 
+
+gdp.vect <- vect(gdp.adm1.2015)
+
+gdp.ras <- rasterize(gdp.adm1.2015, isoraster, field = 'X2015')
+
+ 
+
+writeRaster(gdp.ras, "qmra inputs/Global/treatment_levels_adm2.tiff")

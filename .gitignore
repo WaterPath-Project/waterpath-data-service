@@ -143,6 +143,9 @@ cython_debug/
 
 waterpath_data_service/data/*
 waterpath_data_service/static/data/*
+!waterpath_data_service/static/data/gdp_kummu_2025/
+waterpath_data_service/static/data/gdp_kummu_2025/*
+!waterpath_data_service/static/data/gdp_kummu_2025/rast_adm2_gdp_perCapita_1990_2024.tif
 
 # Geodata files
 *.shp
