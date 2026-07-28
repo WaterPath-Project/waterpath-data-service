@@ -1,1 +1,0 @@
-waterpath_data_service/static/data/gdp_kummu_2025/rast_adm2_gdp_perCapita_1990_2024.tif filter=lfs diff=lfs merge=lfs -text
