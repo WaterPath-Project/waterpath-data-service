@@ -38,6 +38,138 @@ _FAOSTAT_COUNTRY_GROUPS_CSV_URL = (
     "main/livestock_projections/data/original/FAOSTAT_country_groups.csv"
 )
 
+# ---------------------------------------------------------------------------
+# Species-absence gate
+# ---------------------------------------------------------------------------
+# Maps each heads-raster species name to the corresponding Tot_<key> column in
+# manure_management_systems.csv.  When Tot_<key> == 0.0 (explicit numeric zero,
+# not NA) for the session country, that species has no livestock population and
+# all generated outputs are zeroed rather than filled with IPCC-regional averages.
+_HEADS_SPECIES_TO_TOT_KEY: dict[str, str] = {
+    "cattle":    "cattle",
+    "buffaloes": "buffaloes",
+    "chickens":  "poultry",
+    "ducks":     "poultry",
+    "goats":     "goats",
+    "pigs":      "pigs",
+    "sheep":     "sheep",
+    "horses":    "horses",
+    "donkeys":   "asses",
+    "asses":     "asses",
+    "mules":     "mules",
+    "camels":    "camels",
+}
+
+# Maps each production-system / manure-fraction species prefix to the same Tot_ keys.
+_PROD_SPECIES_TO_TOT_KEY: dict[str, str] = {
+    "meat":      "cattle",
+    "dairy":     "cattle",
+    "buffaloes": "buffaloes",
+    "pigs":      "pigs",
+    "poultry":   "poultry",
+    "sheep":     "sheep",
+    "goats":     "goats",
+    "horses":    "horses",
+    "asses":     "asses",
+    "mules":     "mules",
+    "camels":    "camels",
+}
+
+# Maps each manure-management column suffix to the same Tot_ keys.
+# dairy/meat/cattle are all sub-categories of cattle in the management CSV.
+_MGMT_SUFFIX_TO_TOT_KEY: dict[str, str] = {
+    "dairy":     "cattle",
+    "meat":      "cattle",
+    "cattle":    "cattle",
+    "buffaloes": "buffaloes",
+    "pigs":      "pigs",
+    "poultry":   "poultry",
+    "sheep":     "sheep",
+    "goats":     "goats",
+    "horses":    "horses",
+    "mules":     "mules",
+    "asses":     "asses",
+    "camels":    "camels",
+}
+
+
+def _load_absent_livestock_species(mapping: pd.DataFrame, static_data_dir: Path) -> frozenset[str]:
+    """Return Tot_-key species that have no livestock population in the session country.
+
+    A species is absent when its ``Tot_{species}`` column in
+    ``manure_management_systems.csv`` is explicitly 0.0 (not NA) for the
+    session's primary ISO-3 country.  Vermeulen 2017 sets those rows to NA
+    for the fraction columns and 0 for the total when the animal simply does
+    not exist as managed livestock in that country (e.g. buffaloes in Uganda).
+    """
+    mm_csv = static_data_dir / "vermeulen_2017" / "manure_management_systems.csv"
+
+    iso3_series = mapping["gid"].str[:3].mode()
+    if iso3_series.empty:
+        return frozenset()
+    iso3 = str(iso3_series.iloc[0])
+
+    groups = pd.read_csv(_FAOSTAT_COUNTRY_GROUPS_CSV_URL)
+    groups["M49 Code"] = pd.to_numeric(groups["M49 Code"], errors="coerce")
+    groups = groups.dropna(subset=["M49 Code", "ISO3 Code"]).copy()
+    groups["M49 Code"] = groups["M49 Code"].astype(np.int32)
+    iso3_to_m49 = (
+        groups.drop_duplicates(subset=["ISO3 Code"], keep="first")
+        .set_index("ISO3 Code")["M49 Code"]
+        .to_dict()
+    )
+    m49 = iso3_to_m49.get(iso3)
+    if m49 is None:
+        logger.warning("No M49 code found for ISO3 %s; absent-species gate disabled.", iso3)
+        return frozenset()
+
+    src = pd.read_csv(mm_csv, encoding="latin-1")
+    src["iso"] = pd.to_numeric(src["iso"], errors="coerce")
+    row_df = src[src["iso"] == m49]
+    if row_df.empty:
+        logger.warning("M49 %s not found in manure_management_systems.csv; absent-species gate disabled.", m49)
+        return frozenset()
+    row = row_df.iloc[0]
+
+    # Unique tot-keys (preserving the set from _MGMT_SUFFIX_TO_TOT_KEY values)
+    unique_tot_keys = list(dict.fromkeys(_MGMT_SUFFIX_TO_TOT_KEY.values()))
+
+    absent: set[str] = set()
+    for sp in unique_tot_keys:
+        col = f"Tot_{sp}"
+        if col not in row.index:
+            continue
+        val = pd.to_numeric(row[col], errors="coerce")
+        if pd.notna(val) and float(val) == 0.0:
+            absent.add(sp)
+
+    if absent:
+        logger.info("Absent livestock species for %s (M49=%s): %s", iso3, m49, ", ".join(sorted(absent)))
+    return frozenset(absent)
+
+
+def _fao_country_total(
+    fao: pd.DataFrame,
+    iso3: str,
+    item_name: str,
+    year: int,
+) -> float | None:
+    """Return a country's reported FAOSTAT stock count, or None when missing."""
+    required_columns = {"Area Code (ISO3)", "Item", "Year", "Value"}
+    if not required_columns.issubset(fao.columns):
+        return None
+
+    year_values = pd.to_numeric(fao["Year"], errors="coerce")
+    rows = fao[
+        fao["Area Code (ISO3)"].astype(str).str.upper().eq(iso3.upper())
+        & fao["Item"].astype(str).eq(item_name)
+        & year_values.eq(year)
+    ]
+    values = pd.to_numeric(rows["Value"], errors="coerce").dropna()
+    if values.empty:
+        return None
+    return float(values.sum())
+
 
 def _native_tif_resolution(raster_path: Path) -> float:
     with rasterio.open(raster_path) as src:
@@ -72,6 +204,41 @@ def _feature_gid(feature: dict, fallback_iso: int) -> str:
     ).strip()
 
 
+def _session_human_isoraster_path(session_dir: Path) -> Path:
+    return session_dir / "baseline" / "human_emissions" / "isoraster.tif"
+
+
+def _rasterize_features_to_profile(
+    features: pd.DataFrame,
+    gid_to_iso: dict[str, int],
+    profile: rasterio.profiles.Profile,
+) -> np.ndarray:
+    shapes = [
+        (row.geometry.__geo_interface__, int(gid_to_iso.get(_feature_gid(row, idx + 1), idx + 1)))
+        for _, idx, row in sorted(
+            (
+                (
+                    (row.geometry.bounds[2] - row.geometry.bounds[0])
+                    * (row.geometry.bounds[3] - row.geometry.bounds[1]),
+                    idx,
+                    row,
+                )
+                for idx, (_, row) in enumerate(features.iterrows())
+            ),
+            key=lambda item: item[0],
+            reverse=True,
+        )
+    ]
+    return rasterize(
+        shapes,
+        out_shape=(profile["height"], profile["width"]),
+        transform=profile["transform"],
+        fill=0,
+        dtype=np.int32,
+        all_touched=True,
+    )
+
+
 def _build_livestock_zone_template(
     session_dir: Path,
     static_data_dir: Path,
@@ -101,61 +268,58 @@ def _build_livestock_zone_template(
     raw = max(glw4_native_res, min(0.5, diagonal / 100.0))
     res = _round_to_nice_res(raw)
 
-    # Livestock data is not meaningful when the study area covers fewer than
-    # this many GLW4 pixels in each spatial dimension (e.g. city sub-districts).
     _MIN_GLW4_PIXELS = 4
-    if extent_x < _MIN_GLW4_PIXELS * glw4_native_res or extent_y < _MIN_GLW4_PIXELS * glw4_native_res:
-        raise ValueError(
-            f"Study area extent ({extent_x:.4f}\u00b0 \u00d7 {extent_y:.4f}\u00b0) is too small "
-            f"for GLW4 livestock data: at least {_MIN_GLW4_PIXELS} source pixels "
-            f"({glw4_native_res:.4f}\u00b0 each) are required in each dimension. "
-            "Livestock inputs are not supported for sub-district study areas."
-        )
+    below_native = extent_x < _MIN_GLW4_PIXELS * glw4_native_res or extent_y < _MIN_GLW4_PIXELS * glw4_native_res
 
-    xmin = max(math.floor(xmin_data / res) * res - res, -180.0)
-    ymin = max(math.floor(ymin_data / res) * res - res, -90.0)
-    xmax = min(math.ceil(xmax_data / res) * res + res, 180.0)
-    ymax = min(math.ceil(ymax_data / res) * res + res, 90.0)
+    if below_native:
+        reference_path = _session_human_isoraster_path(session_dir)
+        if reference_path.is_file():
+            with rasterio.open(reference_path) as ref:
+                profile = ref.profile.copy()
+            zone_idx = _rasterize_features_to_profile(features, gid_to_iso, profile)
+        else:
+            raw = min(0.5, diagonal / 100.0)
+            res = _round_to_nice_res(raw)
+            xmin = max(math.floor(xmin_data / res) * res - res, -180.0)
+            ymin = max(math.floor(ymin_data / res) * res - res, -90.0)
+            xmax = min(math.ceil(xmax_data / res) * res + res, 180.0)
+            ymax = min(math.ceil(ymax_data / res) * res + res, 90.0)
 
-    width = round((xmax - xmin) / res)
-    height = round((ymax - ymin) / res)
-    transform = from_bounds(xmin, ymin, xmax, ymax, width, height)
+            width = round((xmax - xmin) / res)
+            height = round((ymax - ymin) / res)
+            transform = from_bounds(xmin, ymin, xmax, ymax, width, height)
+            profile = {
+                "driver": "GTiff",
+                "dtype": "int32",
+                "nodata": 0,
+                "width": width,
+                "height": height,
+                "count": 1,
+                "crs": "EPSG:4326",
+                "transform": transform,
+            }
+            zone_idx = _rasterize_features_to_profile(features, gid_to_iso, profile)
+    else:
+        xmin = max(math.floor(xmin_data / res) * res - res, -180.0)
+        ymin = max(math.floor(ymin_data / res) * res - res, -90.0)
+        xmax = min(math.ceil(xmax_data / res) * res + res, 180.0)
+        ymax = min(math.ceil(ymax_data / res) * res + res, 90.0)
 
-    shapes = [
-        (row.geometry.__geo_interface__, int(gid_to_iso.get(_feature_gid(row, idx + 1), idx + 1)))
-        for _, idx, row in sorted(
-            (
-                (
-                    (row.geometry.bounds[2] - row.geometry.bounds[0])
-                    * (row.geometry.bounds[3] - row.geometry.bounds[1]),
-                    idx,
-                    row,
-                )
-                for idx, (_, row) in enumerate(features.iterrows())
-            ),
-            key=lambda item: item[0],
-            reverse=True,
-        )
-    ]
-    zone_idx = rasterize(
-        shapes,
-        out_shape=(height, width),
-        transform=transform,
-        fill=0,
-        dtype=np.int32,
-        all_touched=True,
-    )
+        width = round((xmax - xmin) / res)
+        height = round((ymax - ymin) / res)
+        transform = from_bounds(xmin, ymin, xmax, ymax, width, height)
+        profile = {
+            "driver": "GTiff",
+            "dtype": "int32",
+            "nodata": 0,
+            "width": width,
+            "height": height,
+            "count": 1,
+            "crs": "EPSG:4326",
+            "transform": transform,
+        }
+        zone_idx = _rasterize_features_to_profile(features, gid_to_iso, profile)
 
-    profile = {
-        "driver": "GTiff",
-        "dtype": "int32",
-        "nodata": 0,
-        "width": width,
-        "height": height,
-        "count": 1,
-        "crs": "EPSG:4326",
-        "transform": transform,
-    }
     valid_mask = zone_idx > 0
     return zone_idx, valid_mask, profile
 
@@ -208,6 +372,9 @@ def _clip_raster_to_zone_grid(
         else:
             src_arr = np.where(src_arr == nd, np.nan, src_arr)
             nd = np.nan
+        dst_res = abs(zone_profile["transform"].a)
+        src_res = abs(src.transform.a)
+        resampling = Resampling.nearest if dst_res < src_res else Resampling.bilinear
         reproject(
             source=src_arr,
             destination=dst,
@@ -217,7 +384,7 @@ def _clip_raster_to_zone_grid(
             dst_transform=zone_profile["transform"],
             dst_crs=zone_profile["crs"],
             dst_nodata=np.nan,
-            resampling=Resampling.bilinear,
+            resampling=resampling,
         )
     # Bilinear interpolation at nodata boundaries can still produce small
     # negative artefacts; clamp them because animal head counts must be >= 0.
@@ -225,61 +392,32 @@ def _clip_raster_to_zone_grid(
     return dst
 
 
-def _clip_count_raster_to_zone_grid(
-    source_raster: Path,
-    zone_profile: rasterio.profiles.Profile,
-    source_nodata: float | None = None,
-) -> np.ndarray:
-    """Reproject/clip a *count-per-pixel* raster to the zone grid.
+def _write_livestock_assumptions(output_dir: Path, extent_x: float, extent_y: float, glw4_native_res: float, below_native: bool) -> Path | None:
+    if not below_native:
+        return None
 
-    Unlike :func:`_clip_raster_to_zone_grid` (which expects the source to be
-    a density, e.g. heads/km²), this helper handles rasters whose pixel
-    values are absolute counts for the source pixel — e.g. the GLW3/4 2015
-    duck raster ``5_Dk_2015_Da.tif`` (heads/pixel).
-
-    Bilinearly resampling such a raster directly would re-use the per-source
-    -pixel value at every overlapping destination pixel, inflating or
-    deflating totals by roughly the squared ratio of pixel sizes when the
-    grids differ.  To preserve areal totals the source is converted to a
-    density (counts / source-pixel-area-km²), resampled with bilinear, then
-    multiplied by the destination pixel area (km²).  The returned array
-    therefore has the same units (heads/destination-pixel) and dtype that
-    callers of :func:`_clip_raster_to_zone_grid` produce after multiplying
-    its output by ``_pixel_area_km2``.
-    """
-    with rasterio.open(source_raster) as src:
-        src_counts = src.read(1).astype(np.float32)
-        nd = source_nodata if source_nodata is not None else src.nodata
-        if nd is None:
-            mask = src_counts < 0
-        else:
-            mask = src_counts == nd
-        src_area = _pixel_area_km2(src.profile)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            src_density = np.where(src_area > 0, src_counts / src_area, np.nan)
-        src_density = np.where(mask, np.nan, src_density).astype(np.float32)
-
-        dst_density = np.full(
-            (zone_profile["height"], zone_profile["width"]),
-            np.nan,
-            dtype=np.float32,
-        )
-        reproject(
-            source=src_density,
-            destination=dst_density,
-            src_transform=src.transform,
-            src_crs=src.crs,
-            src_nodata=np.nan,
-            dst_transform=zone_profile["transform"],
-            dst_crs=zone_profile["crs"],
-            dst_nodata=np.nan,
-            resampling=Resampling.bilinear,
-        )
-    # Bilinear interpolation at nodata boundaries can still produce small
-    # negative artefacts; clamp them because animal head counts must be >= 0.
-    dst_density = np.where(dst_density < 0, np.nan, dst_density)
-    dst_area = _pixel_area_km2(zone_profile)
-    return (dst_density * dst_area).astype(np.float32)
+    assumptions_path = output_dir / "assumptions.csv"
+    assumptions_path.parent.mkdir(parents=True, exist_ok=True)
+    assumptions = pd.DataFrame(
+        [
+            {
+                "id": "livestock_resolution",
+                "scenario": "baseline",
+                "year": "baseline",
+                "admin_level": "all",
+                "pathogen": "all",
+                "assumption": (
+                    f"Study area extent ({extent_x:.3f}\u00b0 x {extent_y:.3f}\u00b0) is smaller than "
+                    f"4 native GLW4 livestock cells ({glw4_native_res:.4f}\u00b0 each). Clipped rasters are "
+                    "aligned to the isoraster grid with nearest-neighbour resampling, so livestock values "
+                    "are uniform (coarse) blocks copied from the overlapping source cell(s) and do not "
+                    "resolve sub-cell spatial variation."
+                ),
+            }
+        ]
+    )
+    assumptions.to_csv(assumptions_path, index=False)
+    return assumptions_path
 
 
 def _write_float_raster(arr: np.ndarray, zone_profile: rasterio.profiles.Profile, out_path: Path) -> None:
@@ -327,7 +465,9 @@ def _aggregate_lookup_columns(
 ) -> pd.DataFrame:
     flat_zone = zone_idx.reshape(-1)
     flat_region = region_idx.reshape(-1)
-    flat_mask = valid_mask.reshape(-1) & np.isfinite(flat_region)
+    # Exclude both NaN and 0 from the region mask.  0 indicates nodata/ocean in
+    # the nutdata raster and is not a valid IPCC region code.
+    flat_mask = valid_mask.reshape(-1) & np.isfinite(flat_region) & (flat_region > 0)
 
     data = pd.DataFrame(
         {
@@ -340,6 +480,23 @@ def _aggregate_lookup_columns(
         data.groupby("iso", as_index=False)["region"]
         .agg(lambda values: values.value_counts().idxmax())
         .rename(columns={"region": "_region"})
+    )
+
+    # Fall back any zone that had no valid region pixels to the session-wide
+    # dominant region.  This handles small high-resolution zones that fall
+    # entirely on gaps/ocean pixels in the coarse nutdata raster.
+    all_zone_isos = pd.DataFrame(
+        {"iso": np.unique(flat_zone[valid_mask.reshape(-1)].astype(np.int32))}
+    )
+    if dominant_region.empty:
+        finite_vals = flat_region[np.isfinite(flat_region) & (flat_region > 0)]
+        fallback_region = int(finite_vals[0]) if len(finite_vals) > 0 else 1
+    else:
+        fallback_region = int(dominant_region["_region"].mode().iloc[0])
+
+    dominant_region = all_zone_isos.merge(dominant_region, on="iso", how="left")
+    dominant_region["_region"] = (
+        dominant_region["_region"].fillna(fallback_region).astype(np.int32)
     )
 
     out = dominant_region[["iso"]].copy()
@@ -375,6 +532,7 @@ def _generate_production_systems(
     zone_idx: np.ndarray,
     valid_mask: np.ndarray,
     zone_profile: rasterio.profiles.Profile,
+    absent_species: frozenset[str] = frozenset(),
 ) -> Path:
     nutdata_raster = static_data_dir / "vermeulen_2017" / "nutdata_2000_iso.tif"
     nutdata_csv = static_data_dir / "vermeulen_2017" / "nutdata_2000_intensive_extensive.csv"
@@ -407,6 +565,19 @@ def _generate_production_systems(
     )
 
     out = mapping.merge(agg, on="iso", how="left")
+    # Fill any NaN rows produced by zones that are too small to appear in the
+    # zone raster and therefore never entered _aggregate_lookup_columns.
+    # All zones in a session share the same IPCC region, so the first valid
+    # row's values are the correct fallback for every unmatched zone.
+    if out[value_columns].isnull().any().any() and not agg.empty:
+        valid_rows = agg[value_columns].dropna(how="all")
+        if not valid_rows.empty:
+            out[value_columns] = out[value_columns].fillna(valid_rows.iloc[0])
+    # Zero columns for species absent in the session country.
+    for sp_prefix, tot_key in _PROD_SPECIES_TO_TOT_KEY.items():
+        if tot_key in absent_species:
+            absent_cols = [c for c in value_columns if c.startswith(f"{sp_prefix}_")]
+            out[absent_cols] = 0.0
     out_path = output_dir / "production_systems.csv"
     out.to_csv(out_path, index=False)
     return out_path
@@ -419,6 +590,7 @@ def _generate_manure_fractions(
     zone_idx: np.ndarray,
     valid_mask: np.ndarray,
     zone_profile: rasterio.profiles.Profile,
+    absent_species: frozenset[str] = frozenset(),
 ) -> Path:
     nutdata_raster = static_data_dir / "vermeulen_2017" / "nutdata_2000_iso.tif"
     fractions_csv = static_data_dir / "vermeulen_2017" / "nutdata_2000_fractions_mm.csv"
@@ -451,6 +623,17 @@ def _generate_manure_fractions(
     )
 
     out = mapping.merge(agg, on="iso", how="left")
+    # Same fallback as production_systems: fill sub-pixel zones from the first
+    # valid row (all zones share the same IPCC region within a session).
+    if out[value_columns].isnull().any().any() and not agg.empty:
+        valid_rows = agg[value_columns].dropna(how="all")
+        if not valid_rows.empty:
+            out[value_columns] = out[value_columns].fillna(valid_rows.iloc[0])
+    # Zero columns for species absent in the session country.
+    for sp_prefix, tot_key in _PROD_SPECIES_TO_TOT_KEY.items():
+        if tot_key in absent_species:
+            absent_cols = [c for c in value_columns if c.startswith(f"{sp_prefix}_")]
+            out[absent_cols] = 0.0
     out_path = output_dir / "manure_fractions.csv"
     out.to_csv(out_path, index=False)
     return out_path
@@ -460,6 +643,7 @@ def _generate_manure_management(
     static_data_dir: Path,
     output_dir: Path,
     mapping: pd.DataFrame,
+    absent_species: frozenset[str] = frozenset(),
 ) -> Path:
     mm_csv = static_data_dir / "vermeulen_2017" / "manure_management_systems.csv"
 
@@ -493,6 +677,14 @@ def _generate_manure_management(
     mm_lookup = src.drop_duplicates(subset=["iso"], keep="first").set_index("iso")
     for col in value_columns:
         out[col] = out["m49"].map(mm_lookup[col])
+
+    # For species that are absent from the session country (Tot_<species> == 0
+    # in Vermeulen), replace NA with explicit 0.0.  This keeps all columns
+    # numeric so downstream consumers never receive an empty data frame.
+    for suffix, tot_key in _MGMT_SUFFIX_TO_TOT_KEY.items():
+        if tot_key in absent_species:
+            cols = [c for c in value_columns if c.endswith(f"_{suffix}")]
+            out[cols] = out[cols].fillna(0.0)
 
     out = out.drop(columns=["iso3", "m49"])
 
@@ -665,6 +857,9 @@ def _generate_animal_heads_rasters(
     zone_profile: rasterio.profiles.Profile,
     valid_mask: np.ndarray,
     zone_ipcc_arr: np.ndarray,
+    zone_idx: np.ndarray,
+    mapping: pd.DataFrame,
+    absent_species: frozenset[str] = frozenset(),
 ) -> dict[str, str]:
     """
     Generate per-animal heads rasters clipped to the session extent.
@@ -672,11 +867,12 @@ def _generate_animal_heads_rasters(
     GLW4 2020 rasters cover cattle, buffaloes, chickens, goats, pigs, sheep.
     These rasters store animal *density* (heads/km²) and are multiplied by
     pixel area to yield total heads per pixel.
-    Ducks are taken from GLW4 2015 and scaled to 2020 using global FAOSTAT totals.
-    The 2015 duck raster already stores total heads per pixel, so no area
-    conversion is needed.
-    Horses, donkeys, asses, mules, and camels use a sheep+goat spatial proxy scaled
-    by the ratio of each species' FAOSTAT 2020 global total to the combined sheep+goat total.
+    Ducks are taken from GLW4 2015 and scaled to 2020 using country-specific
+    FAOSTAT growth rates.  The 2015 duck raster already stores total heads per
+    pixel, so no area conversion is needed.
+    Horses, donkeys, asses, mules, and camels use a sheep+goat spatial proxy
+    scaled by each country's FAOSTAT species-to-sheep/goat ratio.
+    Missing country values fall back to the corresponding global ratio.
     Proxy species listed in ``_PROXY_ALLOWED_IPCC_REGIONS`` are additionally
     masked to their plausible IPCC regions to avoid artefacts (e.g. camels in
     Europe due to the sheep/goat proxy).
@@ -698,6 +894,21 @@ def _generate_animal_heads_rasters(
         sub = fao[(fao["Year"] == year) & (fao["Item"] == item_name)]
         return float(sub["Value"].sum())
 
+    iso_to_alpha3 = (
+        mapping.drop_duplicates(subset=["iso"], keep="first")
+        .assign(_alpha3=lambda df: df["gid"].astype(str).str[:3])
+        .set_index("iso")["_alpha3"]
+        .to_dict()
+    )
+    country_masks: dict[str, np.ndarray] = {}
+    for iso_id in np.unique(zone_idx[valid_mask]):
+        alpha3 = iso_to_alpha3.get(int(iso_id))
+        if alpha3 is None:
+            continue
+        if alpha3 not in country_masks:
+            country_masks[alpha3] = np.zeros(zone_idx.shape, dtype=bool)
+        country_masks[alpha3] |= (zone_idx == iso_id) & valid_mask
+
     created: dict[str, str] = {}
 
     # GLW4 2020 direct mappings (density rasters → multiply by pixel area)
@@ -710,23 +921,40 @@ def _generate_animal_heads_rasters(
         "sheep":     "GLW4-2020.D-DA.SHP.tif",
     }
     for animal, fname in glw4_direct.items():
-        arr = _clip_raster_to_zone_grid(glw4_2020_dir / fname, zone_profile)
-        arr = np.where(np.isfinite(arr), arr * pixel_area, np.nan).astype(np.float32)
-        arr[~valid_mask] = np.nan
+        if _HEADS_SPECIES_TO_TOT_KEY.get(animal) in absent_species:
+            arr = np.where(valid_mask, 0.0, np.nan).astype(np.float32)
+        else:
+            arr = _clip_raster_to_zone_grid(glw4_2020_dir / fname, zone_profile)
+            arr = np.where(np.isfinite(arr), arr * pixel_area, np.nan).astype(np.float32)
+            arr[~valid_mask] = np.nan
         out_path = animals_dir / f"{animal}_heads.tif"
         _write_float_raster(arr, zone_profile, out_path)
         created[animal] = str(out_path)
         logger.debug("Written %s", out_path)
 
-    # Ducks: GLW4 2015 stores total heads/pixel already — only scale 2015→2020.
-    # Use the count-aware resampler so totals are preserved when the source
-    # (~10 km) and zone grids differ.
+    # Ducks: GLW4 2015 stores total heads/pixel.  Apply each country's reported
+    # 2015→2020 FAOSTAT growth rate while preserving the local GLW4 pattern.
     duck_2015_total = _fao_total("Ducks", 2015)
     duck_2020_total = _fao_total("Ducks", 2020)
     duck_scale = duck_2020_total / duck_2015_total if duck_2015_total > 0 else 1.0
-    duck_arr = _clip_count_raster_to_zone_grid(glw4_2015_dir / "5_Dk_2015_Da.tif", zone_profile)
-    duck_arr = np.where(np.isfinite(duck_arr), duck_arr * duck_scale, np.nan).astype(np.float32)
-    duck_arr[~valid_mask] = np.nan
+    if _HEADS_SPECIES_TO_TOT_KEY.get("ducks") in absent_species:
+        duck_arr = np.where(valid_mask, 0.0, np.nan).astype(np.float32)
+    else:
+        duck_source = _clip_raster_to_zone_grid(glw4_2015_dir / "5_Dk_2015_Da.tif", zone_profile)
+        duck_arr = np.where(np.isfinite(duck_source), duck_source * duck_scale, np.nan).astype(np.float32)
+        for alpha3, country_mask in country_masks.items():
+            country_2015 = _fao_country_total(fao, alpha3, "Ducks", 2015)
+            country_2020 = _fao_country_total(fao, alpha3, "Ducks", 2020)
+            if country_2015 is None or country_2020 is None or country_2015 <= 0:
+                logger.warning(
+                    "Missing FAOSTAT duck totals for %s; using global 2015-to-2020 ratio.",
+                    alpha3,
+                )
+                continue
+            country_scale = country_2020 / country_2015
+            use = country_mask & np.isfinite(duck_source)
+            duck_arr[use] = duck_source[use] * country_scale
+        duck_arr[~valid_mask] = np.nan
     out_path = animals_dir / "ducks_heads.tif"
     _write_float_raster(duck_arr, zone_profile, out_path)
     created["ducks"] = str(out_path)
@@ -741,7 +969,7 @@ def _generate_animal_heads_rasters(
     shp_arr = np.where(np.isfinite(shp_arr), shp_arr * pixel_area, np.nan)
     gts_arr = np.where(np.isfinite(gts_arr), gts_arr * pixel_area, np.nan)
     proxy_arr = np.where(np.isfinite(shp_arr) & np.isfinite(gts_arr), shp_arr + gts_arr, np.nan)
-    proxy_total = _fao_total("Sheep") + _fao_total("Goats")
+    global_proxy_total = _fao_total("Sheep") + _fao_total("Goats")
 
     proxy_species = {
         "horses":  "Horses",
@@ -751,17 +979,35 @@ def _generate_animal_heads_rasters(
         "camels":  "Camels",
     }
     for animal, fao_item in proxy_species.items():
-        fao_count = _fao_total(fao_item)
-        ratio = fao_count / proxy_total if proxy_total > 0 else 0.0
-        arr = np.where(np.isfinite(proxy_arr), proxy_arr * ratio, np.nan).astype(np.float32)
-        # Restrict species to their biologically plausible IPCC regions.
-        allowed_regions = _PROXY_ALLOWED_IPCC_REGIONS.get(animal)
-        if allowed_regions is not None:
-            region_ok = np.zeros(zone_ipcc_arr.shape, dtype=bool)
-            for rid in allowed_regions:
-                region_ok |= zone_ipcc_arr == float(rid)
-            arr = np.where(region_ok, arr, np.nan)
-        arr[~valid_mask] = np.nan
+        if _HEADS_SPECIES_TO_TOT_KEY.get(animal) in absent_species:
+            arr = np.where(valid_mask, 0.0, np.nan).astype(np.float32)
+        else:
+            fao_count = _fao_total(fao_item)
+            global_ratio = fao_count / global_proxy_total if global_proxy_total > 0 else 0.0
+            arr = np.where(np.isfinite(proxy_arr), proxy_arr * global_ratio, np.nan).astype(np.float32)
+            for alpha3, country_mask in country_masks.items():
+                country_count = _fao_country_total(fao, alpha3, fao_item, 2020)
+                country_sheep = _fao_country_total(fao, alpha3, "Sheep", 2020)
+                country_goats = _fao_country_total(fao, alpha3, "Goats", 2020)
+                if country_count is None or country_sheep is None or country_goats is None:
+                    logger.warning(
+                        "Missing FAOSTAT %s or sheep/goat totals for %s; using global ratio.",
+                        fao_item,
+                        alpha3,
+                    )
+                    continue
+                country_proxy_total = country_sheep + country_goats
+                country_ratio = country_count / country_proxy_total if country_proxy_total > 0 else 0.0
+                use = country_mask & np.isfinite(proxy_arr)
+                arr[use] = proxy_arr[use] * country_ratio
+            # Restrict species to their biologically plausible IPCC regions.
+            allowed_regions = _PROXY_ALLOWED_IPCC_REGIONS.get(animal)
+            if allowed_regions is not None:
+                region_ok = np.zeros(zone_ipcc_arr.shape, dtype=bool)
+                for rid in allowed_regions:
+                    region_ok |= zone_ipcc_arr == float(rid)
+                arr = np.where(region_ok, arr, np.nan)
+            arr[~valid_mask] = np.nan
         out_path = animals_dir / f"{animal}_heads.tif"
         _write_float_raster(arr, zone_profile, out_path)
         created[animal] = str(out_path)
@@ -777,6 +1023,19 @@ def generate_livestock_tabular_inputs(session_dir: Path, static_data_dir: Path) 
     mapping = _load_iso_gid_mapping(session_dir)
     zone_idx, valid_mask, zone_profile = _build_livestock_zone_template(session_dir, static_data_dir, mapping)
 
+    native_raster = static_data_dir / "glw4_2020" / "GLW4-2020.D-DA.CTL.tif"
+    glw4_native_res = _native_tif_resolution(native_raster)
+    xmin_data, ymin_data, xmax_data, ymax_data = pyogrio.read_dataframe(_session_shapefile_path(session_dir)).total_bounds.tolist()
+    _write_livestock_assumptions(
+        output_dir=output_dir,
+        extent_x=xmax_data - xmin_data,
+        extent_y=ymax_data - ymin_data,
+        glw4_native_res=glw4_native_res,
+        below_native=(xmax_data - xmin_data) < 4 * glw4_native_res or (ymax_data - ymin_data) < 4 * glw4_native_res,
+    )
+
+    absent_species = _load_absent_livestock_species(mapping, static_data_dir)
+
     production = _generate_production_systems(
         static_data_dir=static_data_dir,
         output_dir=output_dir,
@@ -784,6 +1043,7 @@ def generate_livestock_tabular_inputs(session_dir: Path, static_data_dir: Path) 
         zone_idx=zone_idx,
         valid_mask=valid_mask,
         zone_profile=zone_profile,
+        absent_species=absent_species,
     )
     manure_fractions = _generate_manure_fractions(
         static_data_dir=static_data_dir,
@@ -792,11 +1052,13 @@ def generate_livestock_tabular_inputs(session_dir: Path, static_data_dir: Path) 
         zone_idx=zone_idx,
         valid_mask=valid_mask,
         zone_profile=zone_profile,
+        absent_species=absent_species,
     )
     manure_management = _generate_manure_management(
         static_data_dir=static_data_dir,
         output_dir=output_dir,
         mapping=mapping,
+        absent_species=absent_species,
     )
 
     animal_isoraster, active_region_ids, zone_ipcc_arr = _generate_animal_isoraster(
@@ -817,6 +1079,9 @@ def generate_livestock_tabular_inputs(session_dir: Path, static_data_dir: Path) 
         zone_profile=zone_profile,
         valid_mask=valid_mask,
         zone_ipcc_arr=zone_ipcc_arr,
+        zone_idx=zone_idx,
+        mapping=mapping,
+        absent_species=absent_species,
     )
 
     logger.info("Generated livestock tabular inputs in %s", output_dir)
@@ -1047,6 +1312,7 @@ def generate_livestock_projection_rasters(
     ]
 
     created_tifs: dict[str, str] = {}
+    animal_rates: dict[str, dict[str, float]] = {}
     poultry_rates: dict[str, float] | None = None
     cattle_rates: dict[str, float] | None = None
 
@@ -1080,6 +1346,7 @@ def generate_livestock_projection_rasters(
                 alpha3_rates=rates,
             )
             created_tifs[col.lower()] = str(out_path)
+            animal_rates[col.lower()] = rates
             logger.debug("Projected heads written: %s", out_path)
 
             if col.lower() == "poultry":
@@ -1101,6 +1368,29 @@ def generate_livestock_projection_rasters(
                 alpha3_rates=poultry_rates,
             )
             created_tifs["ducks"] = str(duck_out)
+
+        # Future projections do not always include every baseline species.
+        # Preserve those rasters so scenarios expose the same animal set as the
+        # baseline.  Donkeys share the FAOSTAT "Asses" category and therefore
+        # use the asses growth rate; other unprojected species remain unchanged.
+        created_names = {Path(path).name for path in created_tifs.values()}
+        unchanged_rates = {alpha3: 1.0 for alpha3 in set(iso_to_alpha3.values())}
+        for baseline_tif in baseline_animals_dir.glob("*_heads.tif"):
+            if baseline_tif.name in created_names:
+                continue
+            animal = baseline_tif.stem.removesuffix("_heads")
+            rates = animal_rates.get("asses") if animal == "donkeys" else None
+            out_path = out_animals_dir / baseline_tif.name
+            _scale_and_write_tif(
+                baseline_tif=baseline_tif,
+                out_path=out_path,
+                zone_idx=zone_idx,
+                valid_mask=valid_mask,
+                zone_profile=zone_profile,
+                iso_to_alpha3=iso_to_alpha3,
+                alpha3_rates=rates or unchanged_rates,
+            )
+            created_tifs[animal] = str(out_path)
 
     # ---- Duck column propagation (always, for tabular CSV updates) --------------
     # Propagate poultry_* columns to ducks_* so _update_tabular_csv_from_future
@@ -1213,6 +1503,12 @@ def generate_livestock_projection_rasters(
         _isodata_dst = out_animals_dir / _isodata_csv.name
         if not _isodata_dst.exists():
             shutil.copyfile(_isodata_csv, _isodata_dst)
+
+    baseline_assumptions = baseline_livestock_dir / "assumptions.csv"
+    if baseline_assumptions.is_file():
+        scenario_assumptions = output_dir / "assumptions.csv"
+        if not scenario_assumptions.exists():
+            shutil.copyfile(baseline_assumptions, scenario_assumptions)
 
     return {
         "output_dir": str(output_dir),

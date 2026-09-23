@@ -412,10 +412,15 @@ def _resample_gdp_raster(
     dst_width: int,
     dst_crs,
 ) -> np.ndarray:
-    """Bilinearly resample one band of the GDP raster to the target grid.
+    """Resample one band of the GDP raster to the target grid (nearest-neighbour).
 
-    GDP per capita is an *intensive* quantity, so a plain bilinear average of
-    values (no density conversion) is appropriate.  Source nodata becomes NaN.
+    GDP per capita is an *intensive* quantity, so no density conversion is
+    needed.  Nearest-neighbour is used deliberately in place of bilinear: the
+    Kummu grid (5 arc-min) is coarser than the isoraster it is projected onto,
+    so bilinear would average neighbouring admin cells and pull in the nodata of
+    empty (water / no-data) cells, over-estimating or biasing the zonal mean.
+    Nearest assigns each pixel the value of the single GDP cell it falls in, then
+    the caller takes a zonal mean per admin area.  Source nodata becomes NaN.
     """
     dst_xmin, dst_ymin, dst_xmax, dst_ymax = rasterio.transform.array_bounds(
         dst_height, dst_width, dst_transform
@@ -444,7 +449,7 @@ def _resample_gdp_raster(
         src_crs=src_crs or dst_crs,
         dst_transform=dst_transform,
         dst_crs=dst_crs,
-        resampling=Resampling.bilinear,
+        resampling=Resampling.nearest,
         src_nodata=np.nan,
         dst_nodata=np.nan,
     )

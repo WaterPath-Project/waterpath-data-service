@@ -123,36 +123,116 @@ deviates from the global species mix.
 For ducks, the old code applied a single global 2015→2020 FAOSTAT growth factor,
 ignoring national trends.
 
-**Fix:**
-A new `_fao_country_total(fao, iso3, item_name, year)` helper looks up
-per-country FAOSTAT 2020 national totals by ISO3 code.
+**Fix implemented:**
+The new `_fao_country_total(fao, iso3, item_name, year)` helper looks up a
+country's reported FAOSTAT animal count using its ISO3 country code.  It returns
+`None` when the country, animal, or year is missing, so missing data is not
+mistaken for a reported zero.
 
 *Proxy species (horses, donkeys, asses, mules, camels):*
-- For each country in the session, the total sheep+goat heads within that
-  country's zone are summed from the proxy raster.
-- A per-country scale factor is derived: `FAOSTAT_national_total / proxy_pixel_sum`.
-- The proxy pixels for that country are multiplied by this country-specific scale
-  so the spatial sum exactly matches the FAOSTAT 2020 national count.
-- Countries with no FAOSTAT data fall back to the old global ratio (with a
-  warning logged).
+- For each country, the code reads the 2020 FAOSTAT totals for the proxy animal,
+  sheep, and goats.
+- It calculates that country's species mix:
+  `FAOSTAT_species / (FAOSTAT_sheep + FAOSTAT_goats)`.
+- That country ratio is applied to the local sheep+goat raster pattern inside
+  the study area.
+- If any required country value is missing, the code keeps the old global ratio
+  and writes a warning to the log.
+
+Using a ratio is important for subnational studies.  For example, Kampala must
+receive its estimated share of Uganda's animals, not Uganda's entire national
+animal population.
 
 *Ducks:*
-- Each country's GLW4 2015 pixel sum is computed and used as the 2015 baseline.
-- The per-country scale is: `FAOSTAT_2020_national / GLW4_2015_pixel_sum`.
-- Countries with no FAOSTAT 2020 data fall back to the global 2015→2020 ratio.
+- For each country, the code calculates the FAOSTAT growth ratio:
+  `FAOSTAT_ducks_2020 / FAOSTAT_ducks_2015`.
+- The ratio is applied to the local GLW4 2015 duck pattern.
+- If either country total is missing, the code keeps the global 2015→2020 ratio
+  and writes a warning to the log.
 
-The spatial *pattern* within each country is still taken from the proxy/GLW4
-raster; only the national *total* is constrained to match FAOSTAT, which is the
-same approach GLW4 itself uses for its directly modelled species.
+The spatial *pattern* still comes from the proxy or GLW4 raster.  FAOSTAT changes
+the country-specific ratio or growth rate, not the location of animals inside
+the study area.
+
+FAOSTAT does not contain every animal for every country.  For example, the
+current source contains Uganda's 2020 asses count but no Uganda camel or duck
+count.  Asses therefore use Uganda's country ratio, while camels and ducks keep
+the global fallback.  Missing data is not treated as proof that an animal is
+absent; the separate country gate in section 7 handles that decision.
+
+Future scenarios keep the same complete set of animal rasters as the baseline.
+Donkeys use the projected growth rate for the FAOSTAT `Asses` category.  A
+species with no matching future projection keeps its country-scaled baseline
+distribution instead of disappearing from the scenario folder.
 
 **GLW4 direct species (cattle, chickens, goats, pigs, sheep, buffaloes):**
-No change required.  GLW4 2020 is already calibrated per country, and observed
-differences from the Uganda 2016 census are within the 4-year temporal gap plus
-model uncertainty.
+GLW4 2020 is already calibrated per country, so these rasters do not need the
+FAOSTAT scaling proposed here.  They are still checked by the country-level
+species gate described in section 7.  This prevents a small positive GLW4 value
+from creating livestock that the case-study country does not support.
 
 **Relevant code changes:**
 - `waterpath_data_service/services/livestock.py`
   - New function: `_fao_country_total()`
-  - Updated function: `_generate_animal_heads_rasters()` — new parameters
-    `zone_idx` and `mapping`; per-country scaling loop for both ducks and proxy
-    species.
+  - Updated function: `_generate_animal_heads_rasters()` with `zone_idx` and
+    `mapping`; per-country ratios for ducks and proxy species.
+  - Updated function: `generate_livestock_projection_rasters()`; carries all
+    baseline animal rasters into scenarios when no separate future projection
+    is available.
+
+---
+
+### 7. Species Shown in a Raster but absent from the Country (e.g. Buffaloes in Uganda)
+
+**Issue:**
+GLW4 is a global raster dataset.  In a small study area it can contain a few
+positive pixels for an animal that is not actually kept as livestock in that
+country.  This can be caused by interpolation, model uncertainty, or nearby
+wild populations.
+
+Uganda is an example.  The GLW4 buffalo raster contained positive values around
+Kampala, so the generated `production_systems.csv` said that buffaloes used
+65% intensive and 35% extensive systems.  However, the Vermeulen manure
+management table has no buffalo management fractions for Uganda.  GloWPa saw
+the non-zero production fractions, tried to read the missing buffalo management
+data, and failed.
+
+**Fix implemented:**
+The livestock generator now checks whether each animal is supported for the
+case-study country before accepting values from a global raster.
+
+The check uses the `Tot_<species>` fields in
+`manure_management_systems.csv`.  These fields are checksums of the manure
+management fractions; they are **not animal population counts**.  Normally the
+fractions add up to about 1.0.  A special pattern of an explicit
+`Tot_<species> = 0.0` together with empty management fractions is treated as a
+signal that the species is not managed livestock in that country.
+
+For Uganda, `Tot_buffaloes` is `0.0` and all buffalo management fractions are
+empty.  Buffaloes are therefore gated off for Kampala.
+
+When a species is gated off, the generator makes all related outputs agree:
+
+- The animal-heads TIF contains `0.0` in every valid study-area grid cell.
+- Cells outside the study area remain nodata (`NaN`).
+- Production-system fractions are set to `0.0`.
+- Manure fractions are set to `0.0`.
+- Manure-management fractions are written as numeric `0.0`, not empty values.
+
+Keeping the TIF file and writing zero values is intentional.  All animal rasters
+still have the same grid, extent, and coordinate system, while zero heads means
+that the animal contributes no manure or emissions.  Writing nodata everywhere
+could instead look like a missing or broken input to downstream software.
+
+The same check is available for cattle, buffaloes, poultry, pigs, sheep, goats,
+horses, asses/donkeys, mules, and camels.  It is not hard-coded specifically for
+Uganda or buffaloes.
+
+**Relevant code:**
+- `waterpath_data_service/services/livestock.py`
+  - `_load_absent_livestock_species()`
+  - `_generate_production_systems()`
+  - `_generate_manure_fractions()`
+  - `_generate_manure_management()`
+  - `_generate_animal_heads_rasters()`
+  - `generate_livestock_tabular_inputs()`

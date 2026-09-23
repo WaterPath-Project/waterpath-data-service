@@ -4,10 +4,9 @@ Generate GloWPa-compatible hydrology TIF files from NC source files.
 
 Handles two input types:
 
-1. Tab-separated NC text files (monthly runoff / baseflow / discharge):
+1. Tab-separated NC text files (monthly runoff / discharge):
    static/data/hydrology/hydrology_original/
      monthly_runoff_{scenario}.nc.txt
-     monthly_baseflow_{scenario}.nc.txt
      monthly_discharge_{scenario}.nc.txt
    → computes runoff, discharge, river_depth, river_restime
 
@@ -34,7 +33,7 @@ Output format:
   - Shape: 360 × 720  (global 0.5° grid)
   - Transform: origin (-180, 90), pixel 0.5°
   - CRS: EPSG:4326
-  - NoData: -inf, dtype float32
+    - NoData: NaN, dtype float32, ZSTD compression
 """
 
 import calendar
@@ -70,7 +69,7 @@ GRID_TOP = 90.0         # top edge of grid
 LON_CENTER_0 = GRID_LEFT + GRID_RES / 2   # = -179.75
 LAT_CENTER_0 = GRID_TOP - GRID_RES / 2    # =  89.75
 
-NODATA = -np.inf
+NODATA = np.nan
 
 # ==========================================
 # FLOW-DIRECTION MAP
@@ -130,6 +129,7 @@ def _write_tif(data: np.ndarray, output_path: Path) -> None:
         crs="EPSG:4326",
         transform=transform,
         nodata=NODATA,
+        compress="zstd",
     ) as dst:
         dst.write(out, 1)
 
@@ -219,18 +219,16 @@ def load_flowdir(flowdir_path: Path) -> np.ndarray:
 # HYDRAULICS (from Julia hydraulics.jl)
 # ==========================================
 
-def compute_runoff_rate(
-    runoff_mm: np.ndarray, baseflow_mm: np.ndarray, days: int
-) -> np.ndarray:
+def compute_runoff_rate(runoff_mm: np.ndarray, days: int) -> np.ndarray:
     """
-    Runoff rate [mm/day] = (runoff + baseflow) / days_in_month.
-    Returns NaN where either input is NaN.
+    Surface runoff rate [mm/day] = runoff / days_in_month.
+
+    GloWPa expects surface runoff rather than total runoff plus baseflow.
     """
     out = np.full((GRID_ROWS, GRID_COLS), np.nan, dtype=np.float32)
-    valid = np.isfinite(runoff_mm) & np.isfinite(baseflow_mm)
-    total = runoff_mm[valid] + baseflow_mm[valid]
-    total = np.maximum(total, 0.0)
-    out[valid] = (total / days).astype(np.float32)
+    valid = np.isfinite(runoff_mm)
+    surface_runoff = np.maximum(runoff_mm[valid], 0.0)
+    out[valid] = (surface_runoff / days).astype(np.float32)
     return out
 
 
@@ -332,10 +330,9 @@ def process_scenario(
             return
 
     r_file = data_dir / f"monthly_runoff_{scenario_name}.nc.txt"
-    b_file = data_dir / f"monthly_baseflow_{scenario_name}.nc.txt"
     q_file = data_dir / f"monthly_discharge_{scenario_name}.nc.txt"
 
-    for f in [r_file, b_file, q_file]:
+    for f in [r_file, q_file]:
         if not f.exists():
             print(f"  ✗ Missing {f.name} – skipping {scenario_name}.")
             return
@@ -343,7 +340,6 @@ def process_scenario(
     print(f"\n=== {scenario_name} ===", flush=True)
 
     runoff_grids = load_nc_to_monthly_grids(r_file)
-    baseflow_grids = load_nc_to_monthly_grids(b_file)
     discharge_grids = load_nc_to_monthly_grids(q_file)
 
     print("  Loading flow-direction grid …", flush=True)
@@ -354,10 +350,9 @@ def process_scenario(
         days = calendar.monthrange(2015, m)[1]  # days in this month (non-leap ref)
 
         ro = runoff_grids[m]        # mm/month
-        bf = baseflow_grids[m]      # mm/month
         q = discharge_grids[m]      # m³/s
 
-        ro_rate = compute_runoff_rate(ro, bf, days)
+        ro_rate = compute_runoff_rate(ro, days)
         depth = compute_depth(q)
         restime = compute_restime(q, flowdir)
 

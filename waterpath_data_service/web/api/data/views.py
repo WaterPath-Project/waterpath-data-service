@@ -13,16 +13,16 @@ from waterpath_data_service.services.projections import (
     fetch_treatment_future_csv,
     fetch_livestock_future_csv,
     fetch_sanitation_projection,
-    fetch_gdp_future_csv,
     fetch_assumptions,
+    fetch_gdp_future_csv,
     read_schema_field_names,
 )
-from waterpath_data_service.services.qmra import generate_qmra_inputs, BASE_YEAR as _QMRA_BASE_YEAR
 from waterpath_data_service.services.temperature import (
     generate_temperature_tif,
     _baseline_temperature_path,
 )
 from waterpath_data_service.services.hydrology import generate_hydrology_inputs, list_available_models
+from waterpath_data_service.services.qmra import generate_qmra_inputs
 from waterpath_data_service.services.livestock import (
     generate_livestock_tabular_inputs,
     generate_livestock_projection_rasters,
@@ -72,8 +72,7 @@ _VALID_SCHEMA_TOKENS: set[str] = {
     "population", "sanitation", "treatment",
     "livestock_emissions", "livestock_isodata", "livestock_manure_fractions",
     "livestock_production_systems", "livestock_manure_management",
-    "hydrology",
-    "qmra",
+    "hydrology", "qmra",
 }
 
 
@@ -193,8 +192,23 @@ def ensure_human_emissions_csv(session_id: str) -> Path:
     return out_path
 
 
+def _input_download_cache_path(session_id: str) -> Path:
+    return _DATA_DIR / ".download_cache" / f"{session_id}.zip"
+
+
+def _input_download_cache_is_fresh(session_dir: Path, cache_path: Path) -> bool:
+    if not cache_path.is_file():
+        return False
+    summary_paths = [session_dir / "summary.json"]
+    scenarios_dir = session_dir / "scenarios"
+    if scenarios_dir.is_dir():
+        summary_paths.extend(scenarios_dir.glob("*/summary.json"))
+    source_mtimes = [path.stat().st_mtime_ns for path in summary_paths if path.is_file()]
+    return bool(source_mtimes) and cache_path.stat().st_mtime_ns >= max(source_mtimes)
+
+
 @router.get("/input/download")
-async def download_input_data(session_id: str, file_id: str | None = None):
+def download_input_data(session_id: str, file_id: str | None = None):
     session_dir = _DATA_DIR / session_id
     default_folder = "baseline/"
     if os.path.isdir(session_dir):
@@ -217,6 +231,14 @@ async def download_input_data(session_id: str, file_id: str | None = None):
                 raise HTTPException(status_code=500, detail="Invalid File ID provided.")
         else:
             try:
+                cache_path = _input_download_cache_path(session_id)
+                if _input_download_cache_is_fresh(session_dir, cache_path):
+                    return FileResponse(
+                        path=cache_path,
+                        filename="GloWPa_input.zip",
+                        media_type="application/zip",
+                    )
+
                 # Merge pop + sanitation → human_emissions/isodata.csv
                 ensure_human_emissions_csv(session_id)
 
@@ -231,8 +253,17 @@ async def download_input_data(session_id: str, file_id: str | None = None):
                         detail="Baseline input data missing (treatment.csv).",
                     )
 
-                zip_buffer = io.BytesIO()
-                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                temporary_cache_path = cache_path.with_suffix(".zip.tmp")
+                temporary_cache_path.unlink(missing_ok=True)
+                with zipfile.ZipFile(
+                    temporary_cache_path,
+                    "w",
+                    zipfile.ZIP_DEFLATED,
+                    compresslevel=1,
+                ) as zipf:
+                    zipf.writestr(zipfile.ZipInfo("baseline/"), "")
+
                     # Add geodata/ folder
                     if geodata_dir.is_dir():
                         zipf.writestr(zipfile.ZipInfo("geodata/"), "")
@@ -243,48 +274,64 @@ async def download_input_data(session_id: str, file_id: str | None = None):
                     # Add human_emissions/ folder (isodata.csv, treatment.csv, tifs)
                     # Exclude raw source files that have been merged into isodata.csv.
                     _excluded = {"population.csv", "sanitation.csv"}
-                    zipf.writestr(zipfile.ZipInfo("human_emissions/"), "")
+                    zipf.writestr(zipfile.ZipInfo("baseline/human_emissions/"), "")
                     for item in human_emissions_dir.iterdir():
                         if item.is_file() and item.suffix in (".csv", ".tif") and item.name not in _excluded:
-                            zipf.write(item, arcname=f"human_emissions/{item.name}")
+                            zipf.write(item, arcname=f"baseline/human_emissions/{item.name}")
 
                     # Add livestock_emissions/ folder if present
                     livestock_emissions_dir = default_dir / "livestock_emissions"
                     if livestock_emissions_dir.is_dir():
-                        zipf.writestr(zipfile.ZipInfo("livestock_emissions/"), "")
+                        zipf.writestr(zipfile.ZipInfo("baseline/livestock_emissions/"), "")
                         for item in livestock_emissions_dir.rglob("*"):
                             if item.is_file():
                                 rel = item.relative_to(livestock_emissions_dir).as_posix()
-                                zipf.write(item, arcname=f"livestock_emissions/{rel}")
+                                zipf.write(item, arcname=f"baseline/livestock_emissions/{rel}")
 
                     # Add hydrology/ folder if present
                     hydrology_dir = default_dir / "hydrology"
                     if hydrology_dir.is_dir():
-                        zipf.writestr(zipfile.ZipInfo("hydrology/"), "")
+                        zipf.writestr(zipfile.ZipInfo("baseline/hydrology/"), "")
                         for item in hydrology_dir.rglob("*"):
                             if item.is_file():
                                 rel = item.relative_to(hydrology_dir).as_posix()
-                                zipf.write(item, arcname=f"hydrology/{rel}")
+                                zipf.write(item, arcname=f"baseline/hydrology/{rel}")
 
-                    # Add qmra/ folder if present
+                    # Add baseline QMRA inputs if present.
                     qmra_dir = default_dir / "qmra"
                     if qmra_dir.is_dir():
-                        zipf.writestr(zipfile.ZipInfo("qmra/"), "")
+                        zipf.writestr(zipfile.ZipInfo("baseline/qmra/"), "")
                         for item in qmra_dir.rglob("*"):
                             if item.is_file():
                                 rel = item.relative_to(qmra_dir).as_posix()
-                                zipf.write(item, arcname=f"qmra/{rel}")
+                                zipf.write(item, arcname=f"baseline/qmra/{rel}")
 
-                zip_buffer.seek(0)
+                    # A case-study download is a complete package: preserve the
+                    # baseline/, geodata/, and scenarios/ package structure.
+                    scenarios_dir = session_dir / "scenarios"
+                    if scenarios_dir.is_dir():
+                        zipf.writestr(zipfile.ZipInfo("scenarios/"), "")
+                        for scenario_dir in sorted(
+                            (path for path in scenarios_dir.iterdir() if path.is_dir()),
+                            key=lambda path: path.name,
+                        ):
+                            scenario_prefix = f"scenarios/{scenario_dir.name}"
+                            zipf.writestr(zipfile.ZipInfo(f"{scenario_prefix}/"), "")
+                            for item in scenario_dir.rglob("*"):
+                                if item.is_file():
+                                    rel = item.relative_to(scenario_dir).as_posix()
+                                    zipf.write(item, arcname=f"{scenario_prefix}/{rel}")
+
+                temporary_cache_path.replace(cache_path)
 
             except HTTPException:
                 raise
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"Input data not generated: {e}")
-            return StreamingResponse(
-                zip_buffer,
+            return FileResponse(
+                path=cache_path,
+                filename="GloWPa_input.zip",
                 media_type="application/zip",
-                headers={"Content-Disposition": 'attachment; filename="GloWPa_input.zip"'},
             )
     else:
         raise HTTPException(status_code=500, detail="Invalid Session ID provided.")
@@ -581,74 +628,51 @@ async def generate_projection_data(
                 "assumptions_csv": hydro_result.get("assumptions_csv"),
             })
 
-        elif _schema == "qmra":
-            # Drinking-water map (income-group treatment codes) from GDP per
-            # capita, scaled to the scenario SSP/year.  Zone geometry is
-            # identical across scenarios, so the baseline isoraster is used when
-            # a scenario-local one has not been generated (no population schema).
-            _iso_tif = scenario_dir / "isoraster.tif"
-            if not _iso_tif.is_file():
-                _iso_tif = session_dir / "baseline" / "human_emissions" / "isoraster.tif"
-            if not _iso_tif.is_file():
-                raise HTTPException(
-                    status_code=500,
-                    detail="isoraster.tif not found. Run /input/generate first.",
-                )
-            try:
-                _iso_df = pd.read_csv(scenario_human_emissions_path)
-                _gid_col = next((c for c in ["gid", "alpha3", "iso_country"] if c in _iso_df.columns), None)
-                if _gid_col is None:
-                    raise ValueError("No GID column found in isodata.csv.")
-                _alpha3_list = _iso_df[_gid_col].astype(str).str[:3].unique().tolist()
-                _gdp_future_df = await fetch_gdp_future_csv(
-                    _alpha3_list, ssp_norm, [_QMRA_BASE_YEAR, year]
-                )
-                qmra_result = generate_qmra_inputs(
-                    isoraster_path=_iso_tif,
-                    isodata_path=scenario_human_emissions_path,
-                    static_data_dir=static_data_dir,
-                    out_dir=scenario_dir / "qmra",
-                    gdp_future_df=_gdp_future_df,
-                    ssp=ssp_norm,
-                    year=year,
-                )
-            except Exception as exc:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Failed to generate QMRA inputs: {exc}",
-                )
-            qmra_assumptions = await fetch_assumptions(["qmra"])
-            schema_results.append({
-                "schema": "qmra",
-                "qmra_dir": qmra_result["qmra_dir"],
-                "treatment_raster": qmra_result["treatment_raster"],
-                "treatment_codes": qmra_result["treatment_codes"],
-                "growth_applied": qmra_result["scaled"],
-                "assumptions": qmra_assumptions,
-            })
+            # QMRA treatment map, coupled to hydrology (same scenario grid).
+            if _hydro_ref.is_file() and scenario_human_emissions_path.is_file():
+                try:
+                    _qmra_df = pd.read_csv(scenario_human_emissions_path)
+                    _qmra_gid_col = next(
+                        (c for c in ["iso_country", "alpha3", "gid"] if c in _qmra_df.columns),
+                        None,
+                    )
+                    _qmra_alpha3 = (
+                        _qmra_df[_qmra_gid_col].astype(str).str[:3].unique().tolist()
+                        if _qmra_gid_col else []
+                    )
+                    _gdp_future = await fetch_gdp_future_csv(
+                        _qmra_alpha3, ssp_norm, [2024, year]
+                    )
+                    _qmra_result = generate_qmra_inputs(
+                        isoraster_path=_hydro_ref,
+                        isodata_path=scenario_human_emissions_path,
+                        static_data_dir=static_data_dir,
+                        out_dir=scenario_dir / "qmra",
+                        gdp_future_df=_gdp_future,
+                        ssp=ssp_norm,
+                        year=year,
+                        write_config=False,
+                    )
+                    schema_results.append({
+                        "schema": "qmra",
+                        "qmra_dir": _qmra_result["qmra_dir"],
+                        "treatment_codes": _qmra_result.get("treatment_codes", []),
+                        "scaled": _qmra_result.get("scaled", False),
+                    })
+                except Exception as _qmra_exc:
+                    logger.warning(
+                        "QMRA projection generation failed for session %s (%s %s): %s",
+                        session_id, ssp_norm, year, _qmra_exc,
+                    )
 
-    # Merge generated schemas into the scenario summary without discarding
-    # outputs produced by earlier, schema-specific requests.
-    summary_path = scenario_dir / "summary.json"
-    existing_schemas = []
-    if summary_path.is_file():
-        try:
-            existing_schemas = json.loads(summary_path.read_text(encoding="utf-8")).get(
-                "schemas", []
-            )
-        except (json.JSONDecodeError, OSError):
-            existing_schemas = []
-    generated_names = {result["schema"] for result in schema_results}
+    # Write summary.json to the scenario directory.
     summary_data = {
         "session_id": session_id,
         "ssp": ssp_norm,
         "year": year,
-        "schemas": [
-            result for result in existing_schemas
-            if result.get("schema") not in generated_names
-        ] + schema_results,
+        "schemas": schema_results,
     }
-    with open(summary_path, "w", encoding="utf-8") as sf:
+    with open(scenario_dir / "summary.json", "w", encoding="utf-8") as sf:
         json.dump(summary_data, sf, indent=2)
 
     if _is_multi_schema:
@@ -1087,13 +1111,6 @@ async def download_projection(
                     if item.is_file():
                         rel = item.relative_to(hydrology_out).as_posix()
                         zipf.write(item, arcname=f"hydrology/{rel}")
-            # Add projected qmra/ folder if present.
-            qmra_out = scenario_dir / "qmra"
-            if qmra_out.is_dir():
-                for item in qmra_out.rglob("*"):
-                    if item.is_file():
-                        rel = item.relative_to(qmra_out).as_posix()
-                        zipf.write(item, arcname=f"qmra/{rel}")
 
         zip_buffer.seek(0)
 
@@ -1263,32 +1280,25 @@ async def generate_input_data_package(session_id: str, gids: str, include_livest
                         session_id, _hydro_err,
                     )
 
-            # Generate the baseline QMRA drinking-water map from GDP per capita.
-            # Nominal 2025 baseline: the Kummu 2024 grid grown one year under
-            # SSP2 ("middle of the road").  Generated alongside hydrology.
-            if include_qmra and geodata_shp.is_file():
+            # Generate baseline QMRA treatment map. Coupled to hydrology: the
+            # QMRA run overlays this drinking-water map on the hydrology /
+            # pathogen rasters, so it is only produced when hydrology is too.
+            if include_qmra and include_hydrology and geodata_shp.is_file():
                 _qmra_isoraster = human_emissions_output_path / "isoraster.tif"
                 _qmra_isodata = human_emissions_output_path / "population.csv"
-                if _qmra_isoraster.is_file() and _qmra_isodata.is_file():
+                _qmra_hydro_dir = session_dir / default_path / "hydrology"
+                if (
+                    _qmra_isoraster.is_file()
+                    and _qmra_isodata.is_file()
+                    and _qmra_hydro_dir.is_dir()
+                ):
                     try:
-                        _bl_pop = pd.read_csv(_qmra_isodata)
-                        _gid_col = next(
-                            (c for c in ["gid", "alpha3", "iso_country"] if c in _bl_pop.columns),
-                            None,
-                        )
-                        _alpha3_list = (
-                            _bl_pop[_gid_col].astype(str).str[:3].unique().tolist()
-                            if _gid_col else []
-                        )
-                        _gdp_future_df = await fetch_gdp_future_csv(
-                            _alpha3_list, "SSP2", [_QMRA_BASE_YEAR, 2025]
-                        )
                         generate_qmra_inputs(
                             isoraster_path=_qmra_isoraster,
                             isodata_path=_qmra_isodata,
                             static_data_dir=_STATIC_DIR / "data",
                             out_dir=session_dir / default_path / "qmra",
-                            gdp_future_df=_gdp_future_df,
+                            gdp_future_df=None,
                             ssp="SSP2",
                             year=2025,
                             write_config=True,
@@ -1298,6 +1308,12 @@ async def generate_input_data_package(session_id: str, gids: str, include_livest
                             "Baseline QMRA generation failed for session %s: %s",
                             session_id, _qmra_err,
                         )
+                else:
+                    logger.warning(
+                        "Skipping baseline QMRA for session %s: hydrology or "
+                        "isoraster/population inputs not available.",
+                        session_id,
+                    )
 
             if include_livestock:
                 os.makedirs(session_dir / schemas_path, exist_ok=True)
@@ -1363,12 +1379,16 @@ async def generate_input_data_package(session_id: str, gids: str, include_livest
             d["qmra"] = {
                 "status": "written",
                 "qmra_dir": str(_qmra_dir),
-                "treatment_raster": str(_qmra_dir / "treatment.tif"),
+            }
+        elif not include_hydrology:
+            d["qmra"] = {
+                "status": "skipped",
+                "detail": "QMRA is coupled to hydrology; enable include_hydrology to generate it.",
             }
         else:
             d["qmra"] = {
                 "status": "not_generated",
-                "detail": "QMRA output not found. Requires baseline isoraster.tif and population.csv.",
+                "detail": "QMRA output not found. Check that hydrology and isoraster inputs were created successfully.",
             }
     return d
 

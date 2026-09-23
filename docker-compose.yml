@@ -3,6 +3,7 @@ services:
     build:
       context: .
       dockerfile: ./Dockerfile
+      target: prod
     image: waterpath_data_service:${WATERPATH_DATA_SERVICE_VERSION:-latest}
     restart: always
     env_file:

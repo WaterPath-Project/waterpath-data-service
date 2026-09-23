@@ -299,6 +299,66 @@ surfaces this as a 500 error with a descriptive message.
 
 See [LIVESTOCK_ISSUES.md](LIVESTOCK_ISSUES.md) §5 for background.
 
+---
+
+## Hydrology & QMRA Raster Resampling
+
+Hydrology inputs are produced by `generate_hydrology_inputs()` in
+`waterpath_data_service/services/hydrology.py`, which clips the bundled global
+hydrology grids (ISIMIP3b, native resolution **0.5° ≈ 55 km**) to the study
+area and then reprojects them onto the session `isoraster.tif` grid so every
+output overlays pixel-for-pixel.  The QMRA treatment map
+(`generate_qmra_inputs()` in `qmra.py`) resamples the Kummu GDP grid
+(**5 arc-min**) onto the same `isoraster.tif` grid.  Both steps are
+**coarse → fine** upsampling: the source cell is always larger than the
+destination pixel.
+
+### Nearest-neighbour, never bilinear
+
+Both reprojections use `Resampling.nearest`, **not** `Resampling.bilinear`.
+Bilinear resampling was a source of silent data corruption because it:
+
+1. **Over-estimates from neighbours.** Bilinear blends the four nearest source
+   cell centres, so a destination pixel near a cell boundary is pulled toward
+   the value of an adjacent, spatially distinct cell — inventing gradients that
+   do not exist in a 0.5° grid.
+2. **Bleeds empty / nodata cells.** The hydrology grids are sparse (river cells
+   surrounded by `nodata` / `-inf`), and the GDP grid has nodata over water and
+   unpopulated admin cells. Bilinear propagates that nodata into any of the four
+   neighbouring destination pixels, either blanking otherwise-valid cells or
+   dragging real values toward the nodata sentinel.
+
+Nearest-neighbour copies each destination pixel from the single source cell it
+falls inside. The result is honest **uniform blocks**: no neighbour averaging,
+no gradient fabrication, and no empty-cell contamination. For QMRA the
+per-admin **zonal mean** is taken after resampling, so nearest-neighbour also
+keeps the zonal statistic free of edge/nodata bias.
+
+### Small study areas (below native resolution)
+
+A study area can be smaller than a single hydrology cell. `kampala_level_4`
+(sub-city, admin level 4, extent ~0.16° × 0.19°) spans **less than one** 0.5°
+hydrology cell. Rather than block generation (as the livestock pipeline does),
+hydrology and QMRA **still produce output**, because there is a well-defined
+overlapping source cell to sample honestly: every fine destination pixel takes
+that cell's value uniformly.
+
+When the study area spans fewer than `_MIN_HYDRO_CELLS` (4) native cells in
+either dimension, `generate_hydrology_inputs` records a `hydrology_resolution`
+row in the hydrology `assumptions.csv` stating that values are uniform coarse
+blocks that do not resolve sub-cell variation, and that any coupled QMRA output
+inherits the same limitation. This keeps the output honest and self-documenting
+instead of presenting fabricated detail.
+
+### QMRA coupling
+
+The QMRA treatment map overlays the hydrology / pathogen-concentration rasters
+the QMRA engine consumes, so it is **coupled to hydrology**: it is generated
+only when hydrology is generated (via `include_qmra` on `/input/generate`, and
+automatically alongside the `hydrology` schema on `/projections/generate`).
+When hydrology is skipped, QMRA is skipped too.
+
+
 ### Projection: scaling heads rasters by SSP growth rates
 
 Scenario projections scale the baseline heads rasters using per-country growth
