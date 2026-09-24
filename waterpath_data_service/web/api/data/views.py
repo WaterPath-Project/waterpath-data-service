@@ -23,6 +23,7 @@ from waterpath_data_service.services.temperature import (
 )
 from waterpath_data_service.services.hydrology import generate_hydrology_inputs, list_available_models
 from waterpath_data_service.services.qmra import generate_qmra_inputs
+from waterpath_data_service.services.summary import summarize_session
 from waterpath_data_service.services.livestock import (
     generate_livestock_tabular_inputs,
     generate_livestock_projection_rasters,
@@ -30,7 +31,7 @@ from waterpath_data_service.services.livestock import (
     _build_livestock_zone_template,
 )
 from fastapi import APIRouter, HTTPException, UploadFile, File, Query
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from frictionless import Package, Schema, Resource, checks, validate
 
@@ -207,28 +208,164 @@ def _input_download_cache_is_fresh(session_dir: Path, cache_path: Path) -> bool:
     return bool(source_mtimes) and cache_path.stat().st_mtime_ns >= max(source_mtimes)
 
 
+def _input_download_data_dir(
+    session_dir: Path,
+    scenario: str | None,
+    year: int | None,
+) -> tuple[Path, str | None]:
+    if (scenario is None) != (year is None):
+        raise HTTPException(
+            status_code=422,
+            detail="scenario and year must be provided together.",
+        )
+    if scenario is None:
+        return session_dir / "baseline", None
+
+    scenario_norm = scenario.strip().upper()
+    if scenario_norm not in {f"SSP{i}" for i in range(1, 6)}:
+        raise HTTPException(status_code=422, detail="Invalid scenario. Allowed: SSP1..SSP5")
+    scenario_name = f"{scenario_norm}_{year}"
+    scenario_dir = session_dir / "scenarios" / scenario_name
+    if not scenario_dir.is_dir():
+        raise HTTPException(
+            status_code=404,
+            detail=f"No input data found for scenario {scenario_norm} and year {year}.",
+        )
+    return scenario_dir, scenario_name
+
+
+def _input_preview_paths(data_dir: Path, file_id: str, is_scenario: bool) -> list[Path]:
+    human_emissions_dir = data_dir if is_scenario else data_dir / "human_emissions"
+    livestock_dir = data_dir / "livestock_emissions"
+
+    if file_id in {"population", "sanitation"} and is_scenario:
+        return [human_emissions_dir / "isodata.csv"]
+    if file_id in {"population", "sanitation", "treatment"}:
+        return [human_emissions_dir / f"{file_id}.csv"]
+    if file_id in {
+        "livestock_manure_fractions",
+        "livestock_manure_management",
+        "livestock_production_systems",
+    }:
+        csv_name = file_id.removeprefix("livestock_") + ".csv"
+        return [livestock_dir / csv_name]
+    if file_id == "livestock_isodata":
+        return sorted((livestock_dir / "animals").glob("isodata_*.csv"))
+    return []
+
+
+def _input_preview_schema_path(
+    session_dir: Path,
+    file_id: str,
+    is_scenario: bool,
+) -> Path:
+    schema_name = f"{file_id}.json"
+    session_schema = session_dir / "schemas" / schema_name
+    if not is_scenario and session_schema.is_file():
+        return session_schema
+    return _STATIC_DIR / "schemas" / schema_name
+
+
+def _schema_filtered_preview(
+    paths: list[Path],
+    schema_path: Path,
+    filename: str,
+) -> StreamingResponse:
+    with open(schema_path, encoding="utf-8") as schema_file:
+        descriptor = json.load(schema_file)
+    schema_fields = [field["name"] for field in descriptor.get("fields", [])]
+
+    frame = pd.concat((pd.read_csv(path) for path in paths), ignore_index=True)
+    preview_fields = [field for field in schema_fields if field in frame.columns]
+    if not preview_fields:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Preview data does not contain fields from schema {schema_path.name}.",
+        )
+    output = io.StringIO()
+    frame.loc[:, preview_fields].to_csv(output, index=False)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
+
+
+@router.get("/input/summarize")
+def summarize_input_data(session_id: str) -> JSONResponse:
+    session_dir = _DATA_DIR / session_id
+    if not session_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Session ID not found.")
+
+    baseline_isodata = session_dir / "baseline" / "human_emissions" / "isodata.csv"
+    if not baseline_isodata.is_file():
+        ensure_human_emissions_csv(session_id)
+    return JSONResponse(
+        content=summarize_session(session_dir),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @router.get("/input/download")
-def download_input_data(session_id: str, file_id: str | None = None):
+def download_input_data(
+    session_id: str,
+    file_id: str | None = None,
+    scenario: str | None = None,
+    year: int | None = None,
+):
     session_dir = _DATA_DIR / session_id
     default_folder = "baseline/"
     if os.path.isdir(session_dir):
+        data_dir, scenario_name = _input_download_data_dir(session_dir, scenario, year)
         if file_id is not None:
-            file_path = file_id + ".csv"
-            human_emissions_dir = session_dir / default_folder / "human_emissions"
-            if os.path.isfile(session_dir / file_path):
-                return FileResponse(
-                    path=session_dir / file_path,
-                    filename="datapackage.json",
-                    media_type="text/csv",
-                )
-            elif os.path.isfile(human_emissions_dir / file_path):
-                return FileResponse(
-                    path=human_emissions_dir / file_path,
-                    filename=file_id + ".csv",
-                    media_type="text/csv",
-                )
-            else:
+            preview_paths = _input_preview_paths(
+                data_dir,
+                file_id,
+                is_scenario=scenario_name is not None,
+            )
+            legacy_path = session_dir / f"{file_id}.csv"
+            if (
+                scenario_name is None
+                and (not preview_paths or not preview_paths[0].is_file())
+                and legacy_path.is_file()
+            ):
+                preview_paths = [legacy_path]
+            if not preview_paths or any(not path.is_file() for path in preview_paths):
                 raise HTTPException(status_code=500, detail="Invalid File ID provided.")
+            schema_path = _input_preview_schema_path(
+                session_dir,
+                file_id,
+                is_scenario=scenario_name is not None,
+            )
+            if not schema_path.is_file():
+                raise HTTPException(status_code=500, detail="Invalid File ID provided.")
+            return _schema_filtered_preview(
+                preview_paths,
+                schema_path,
+                filename=file_id + ".csv",
+            )
+        elif scenario_name is not None:
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
+                for item in data_dir.rglob("*"):
+                    if item.is_file():
+                        zipf.write(
+                            item,
+                            arcname=f"scenarios/{scenario_name}/{item.relative_to(data_dir).as_posix()}",
+                        )
+            zip_buffer.seek(0)
+            return StreamingResponse(
+                zip_buffer,
+                media_type="application/zip",
+                headers={
+                    "Content-Disposition": 'attachment; filename="GloWPa_input.zip"'
+                },
+            )
         else:
             try:
                 cache_path = _input_download_cache_path(session_id)
