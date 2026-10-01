@@ -60,19 +60,49 @@ from __future__ import annotations
 
 import logging
 import math
+import warnings
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, Iterator, List
 
 import numpy as np
 import pandas as pd
 import pyogrio
 import rasterio
+from rasterio.errors import NotGeoreferencedWarning
 from rasterio.features import rasterize
 from rasterio.transform import from_bounds
 from rasterio.warp import Resampling, reproject
 from rasterio.windows import from_bounds as window_from_bounds
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _open_raster_with_context(
+    raster_path: str,
+    gids: list[str] | None = None,
+) -> Iterator[rasterio.io.DatasetReader]:
+    """Open a raster and replace anonymous georeferencing warnings with context."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", NotGeoreferencedWarning)
+        source = rasterio.open(raster_path)
+
+    for warning in caught:
+        if issubclass(warning.category, NotGeoreferencedWarning):
+            logger.warning(
+                "Raster has no georeferencing metadata: path=%s gids=%s crs=%s transform=%s warning=%s",
+                raster_path,
+                gids or [],
+                source.crs,
+                source.transform,
+                warning.message,
+            )
+
+    try:
+        yield source
+    finally:
+        source.close()
 
 # ---------------------------------------------------------------------------
 # Public entry point
@@ -144,6 +174,18 @@ def prepare_spatial_inputs(
     # the string area id via isodata["gid"].
     # ------------------------------------------------------------------
     isodata_df = pd.read_csv(isodata_path, dtype=str)
+    area_gids = (
+        isodata_df["gid"].dropna().astype(str).str.strip().unique().tolist()
+        if "gid" in isodata_df.columns
+        else []
+    )
+    logger.info(
+        "Preparing spatial inputs: gids=%s geodata=%s isodata=%s population_raster=%s",
+        area_gids,
+        geodata_path,
+        isodata_path,
+        pop_raster_path,
+    )
     isodata_df["fraction_urban_pop"] = pd.to_numeric(
         isodata_df["fraction_urban_pop"], errors="coerce"
     )
@@ -200,7 +242,7 @@ def prepare_spatial_inputs(
         extent_x = xmax_data - xmin_data
         extent_y = ymax_data - ymin_data
         diagonal = math.hypot(extent_x, extent_y)
-        src_native_res = _native_tif_resolution(pop_raster_path)
+        src_native_res = _native_tif_resolution(pop_raster_path, area_gids)
         target = diagonal / 100.0
         raw = max(src_native_res, min(0.5, target))
         res = _round_to_nice_res(raw)
@@ -279,7 +321,9 @@ def prepare_spatial_inputs(
     # ------------------------------------------------------------------
     # Step 6 – Resample population raster to target grid
     # ------------------------------------------------------------------
-    pop_arr = _resample_pop_raster(pop_raster_path, transform, height, width, crs_out)
+    pop_arr = _resample_pop_raster(
+        pop_raster_path, transform, height, width, crs_out, area_gids
+    )
     pop_arr[~domain_mask] = np.nan
 
     # ------------------------------------------------------------------
@@ -320,9 +364,12 @@ def prepare_spatial_inputs(
 _NICE_RESOLUTIONS = [0.001, 0.002, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5]
 
 
-def _native_tif_resolution(pop_raster_path: str) -> float:
+def _native_tif_resolution(
+    pop_raster_path: str,
+    gids: list[str] | None = None,
+) -> float:
     """Return the x-pixel size (degrees) of the source population raster."""
-    with rasterio.open(pop_raster_path) as src:
+    with _open_raster_with_context(pop_raster_path, gids) as src:
         return abs(src.transform.a)
 
 
@@ -368,6 +415,7 @@ def _resample_pop_raster(
     dst_height: int,
     dst_width: int,
     crs: str,
+    gids: list[str] | None = None,
 ) -> np.ndarray:
     """Resample any population-count raster to the target grid.
 
@@ -381,7 +429,7 @@ def _resample_pop_raster(
         dst_height, dst_width, dst_transform
     )
 
-    with rasterio.open(pop_raster_path) as src:
+    with _open_raster_with_context(pop_raster_path, gids) as src:
         window = window_from_bounds(dst_xmin, dst_ymin, dst_xmax, dst_ymax, src.transform)
         # boundless=True ensures the read array always matches the window
         # dimensions, even when the window extends outside the source raster.

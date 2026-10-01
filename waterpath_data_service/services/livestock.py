@@ -244,7 +244,7 @@ def _build_livestock_zone_template(
     static_data_dir: Path,
     mapping: pd.DataFrame,
 ) -> tuple[np.ndarray, np.ndarray, rasterio.profiles.Profile]:
-    """Build a fresh zone grid from geodata.shp using the same grid-snapping logic as prepare.R."""
+    """Build the livestock zone grid, aligned to the case-study isoraster when available."""
     shapefile_path = _session_shapefile_path(session_dir)
     features = pyogrio.read_dataframe(shapefile_path)
 
@@ -271,35 +271,15 @@ def _build_livestock_zone_template(
     _MIN_GLW4_PIXELS = 4
     below_native = extent_x < _MIN_GLW4_PIXELS * glw4_native_res or extent_y < _MIN_GLW4_PIXELS * glw4_native_res
 
-    if below_native:
-        reference_path = _session_human_isoraster_path(session_dir)
-        if reference_path.is_file():
-            with rasterio.open(reference_path) as ref:
-                profile = ref.profile.copy()
-            zone_idx = _rasterize_features_to_profile(features, gid_to_iso, profile)
-        else:
+    reference_path = _session_human_isoraster_path(session_dir)
+    if reference_path.is_file():
+        with rasterio.open(reference_path) as ref:
+            profile = ref.profile.copy()
+        zone_idx = _rasterize_features_to_profile(features, gid_to_iso, profile)
+    else:
+        if below_native:
             raw = min(0.5, diagonal / 100.0)
             res = _round_to_nice_res(raw)
-            xmin = max(math.floor(xmin_data / res) * res - res, -180.0)
-            ymin = max(math.floor(ymin_data / res) * res - res, -90.0)
-            xmax = min(math.ceil(xmax_data / res) * res + res, 180.0)
-            ymax = min(math.ceil(ymax_data / res) * res + res, 90.0)
-
-            width = round((xmax - xmin) / res)
-            height = round((ymax - ymin) / res)
-            transform = from_bounds(xmin, ymin, xmax, ymax, width, height)
-            profile = {
-                "driver": "GTiff",
-                "dtype": "int32",
-                "nodata": 0,
-                "width": width,
-                "height": height,
-                "count": 1,
-                "crs": "EPSG:4326",
-                "transform": transform,
-            }
-            zone_idx = _rasterize_features_to_profile(features, gid_to_iso, profile)
-    else:
         xmin = max(math.floor(xmin_data / res) * res - res, -180.0)
         ymin = max(math.floor(ymin_data / res) * res - res, -90.0)
         xmax = min(math.ceil(xmax_data / res) * res + res, 180.0)
@@ -392,6 +372,43 @@ def _clip_raster_to_zone_grid(
     return dst
 
 
+def _reproject_counts_to_zone_grid(
+    source_raster: Path,
+    zone_profile: rasterio.profiles.Profile,
+) -> np.ndarray:
+    """Reproject heads-per-pixel values without duplicating totals during upsampling."""
+    with rasterio.open(source_raster) as src:
+        src_arr = src.read(1).astype(np.float32)
+        src_profile = src.profile.copy()
+        if src.nodata is not None:
+            src_arr = np.where(src_arr == src.nodata, np.nan, src_arr)
+        else:
+            src_arr = np.where(src_arr < 0, np.nan, src_arr)
+
+        source_density = src_arr / _pixel_area_km2(src_profile)
+        destination_density = np.full(
+            (zone_profile["height"], zone_profile["width"]),
+            np.nan,
+            dtype=np.float32,
+        )
+        dst_res = abs(zone_profile["transform"].a)
+        src_res = abs(src.transform.a)
+        reproject(
+            source=source_density,
+            destination=destination_density,
+            src_transform=src.transform,
+            src_crs=src.crs,
+            src_nodata=np.nan,
+            dst_transform=zone_profile["transform"],
+            dst_crs=zone_profile["crs"],
+            dst_nodata=np.nan,
+            resampling=Resampling.nearest if dst_res < src_res else Resampling.average,
+        )
+
+    destination_counts = destination_density * _pixel_area_km2(zone_profile)
+    return np.where(destination_counts < 0, np.nan, destination_counts).astype(np.float32)
+
+
 def _write_livestock_assumptions(output_dir: Path, extent_x: float, extent_y: float, glw4_native_res: float, below_native: bool) -> Path | None:
     if not below_native:
         return None
@@ -409,9 +426,9 @@ def _write_livestock_assumptions(output_dir: Path, extent_x: float, extent_y: fl
                 "assumption": (
                     f"Study area extent ({extent_x:.3f}\u00b0 x {extent_y:.3f}\u00b0) is smaller than "
                     f"4 native GLW4 livestock cells ({glw4_native_res:.4f}\u00b0 each). Clipped rasters are "
-                    "aligned to the isoraster grid with nearest-neighbour resampling, so livestock values "
-                    "are uniform (coarse) blocks copied from the overlapping source cell(s) and do not "
-                    "resolve sub-cell spatial variation."
+                    "aligned to the isoraster grid. Region IDs use nearest-neighbour resampling; animal "
+                    "densities are copied from the overlapping source cell(s) and converted to heads using "
+                    "the destination-cell area. Values therefore do not resolve sub-cell spatial variation."
                 ),
             }
         ]
@@ -940,7 +957,7 @@ def _generate_animal_heads_rasters(
     if _HEADS_SPECIES_TO_TOT_KEY.get("ducks") in absent_species:
         duck_arr = np.where(valid_mask, 0.0, np.nan).astype(np.float32)
     else:
-        duck_source = _clip_raster_to_zone_grid(glw4_2015_dir / "5_Dk_2015_Da.tif", zone_profile)
+        duck_source = _reproject_counts_to_zone_grid(glw4_2015_dir / "5_Dk_2015_Da.tif", zone_profile)
         duck_arr = np.where(np.isfinite(duck_source), duck_source * duck_scale, np.nan).astype(np.float32)
         for alpha3, country_mask in country_masks.items():
             country_2015 = _fao_country_total(fao, alpha3, "Ducks", 2015)
@@ -1151,7 +1168,7 @@ def _alpha3_growth_rates(
     total for that country, and the future CSV value is divided by that sum.
     Returns ``1.0`` for any alpha3 not found in *future_df* or with zero baseline.
     """
-    arr = _clip_raster_to_zone_grid(baseline_tif, zone_profile)
+    arr = _reproject_counts_to_zone_grid(baseline_tif, zone_profile)
 
     # Aggregate baseline pixel totals per alpha3 (one alpha3 may span multiple zones).
     alpha3_baseline: dict[str, float] = {}
@@ -1191,7 +1208,7 @@ def _scale_and_write_tif(
     alpha3_rates: dict[str, float],
 ) -> None:
     """Scale *baseline_tif* pixels per alpha3 footprint and write to *out_path*."""
-    arr = _clip_raster_to_zone_grid(baseline_tif, zone_profile)
+    arr = _reproject_counts_to_zone_grid(baseline_tif, zone_profile)
     projected = arr.copy()
     for iso_id in np.unique(zone_idx[valid_mask]):
         alpha3 = iso_to_alpha3.get(int(iso_id))
@@ -1490,15 +1507,17 @@ def generate_livestock_projection_rasters(
         updated_csvs[csv_key] = str(out_csv)
         logger.debug("Updated tabular CSV: %s", out_csv)
 
-    # ---- Static baseline files: copy animal_isoraster.tif and isodata_*.csv ---
+    # ---- Static baseline files: align animal_isoraster.tif and copy isodata CSVs ---
     # These are IPCC region mapping / physiological constants that do not vary
     # by SSP or year.  They must be present alongside the projected heads TIFs
     # so downstream tools find a complete livestock_emissions directory.
-    for _static_src in [baseline_livestock_dir / "animal_isoraster.tif"]:
-        if _static_src.is_file():
-            _static_dst = output_dir / _static_src.name
-            if not _static_dst.exists():
-                shutil.copyfile(_static_src, _static_dst)
+    animal_isoraster_src = baseline_livestock_dir / "animal_isoraster.tif"
+    if animal_isoraster_src.is_file():
+        animal_isoraster_dst = output_dir / animal_isoraster_src.name
+        if not animal_isoraster_dst.exists():
+            animal_regions = _reproject_region_to_zone_grid(animal_isoraster_src, zone_profile)
+            animal_regions[~valid_mask] = np.nan
+            _write_float_raster(animal_regions, zone_profile, animal_isoraster_dst)
     for _isodata_csv in (baseline_livestock_dir / "animals").glob("isodata_*.csv"):
         _isodata_dst = out_animals_dir / _isodata_csv.name
         if not _isodata_dst.exists():

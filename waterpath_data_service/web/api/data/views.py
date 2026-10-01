@@ -570,6 +570,41 @@ async def generate_projection_data(
     if not session_dir.is_dir():
         raise HTTPException(status_code=500, detail="Invalid Session ID provided.")
 
+    projection_gids: list[str] = []
+    projection_population_path = session_dir / "baseline" / "human_emissions" / "population.csv"
+    if projection_population_path.is_file():
+        try:
+            projection_population = pd.read_csv(projection_population_path, dtype=str)
+            projection_gid_column = next(
+                (column for column in ("gid", "alpha3", "iso_country") if column in projection_population.columns),
+                None,
+            )
+            if projection_gid_column:
+                projection_gids = (
+                    projection_population[projection_gid_column]
+                    .dropna()
+                    .astype(str)
+                    .str.strip()
+                    .unique()
+                    .tolist()
+                )
+        except Exception:
+            logger.exception(
+                "Failed to load projection GIDs: session_id=%s population_csv=%s",
+                session_id,
+                projection_population_path,
+            )
+
+    logger.info(
+        "Generating projection: session_id=%s gids=%s schemas=%s ssp=%s year=%s climate_model=%s",
+        session_id,
+        projection_gids,
+        schemas_to_generate,
+        ssp_norm,
+        year,
+        climate_model,
+    )
+
     hydrology_baseline_dir = session_dir / "baseline" / "hydrology"
     if not hydrology_baseline_dir.is_dir():
         schemas_to_generate = [schema_name for schema_name in schemas_to_generate if schema_name != "hydrology"]
@@ -602,13 +637,27 @@ async def generate_projection_data(
 
     for _schema in schemas_to_generate:
         if _schema == "population":
-            out_tif = generate_population_isoraster(
-                session_dir=session_dir,
-                scenario_dir=scenario_dir,
-                static_data_dir=static_data_dir,
-                ssp=ssp_norm,
-                year=year,
-            )
+            try:
+                out_tif = generate_population_isoraster(
+                    session_dir=session_dir,
+                    scenario_dir=scenario_dir,
+                    static_data_dir=static_data_dir,
+                    ssp=ssp_norm,
+                    year=year,
+                )
+            except Exception as exc:
+                logger.exception(
+                    "Population projection failed: session_id=%s gids=%s ssp=%s year=%s scenario_dir=%s",
+                    session_id,
+                    projection_gids,
+                    ssp_norm,
+                    year,
+                    scenario_dir,
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to generate population projection: {exc}",
+                ) from exc
 
             shapefile_path = session_dir / "baseline" / "geodata" / "geodata.shp"
             if not shapefile_path.is_file():
@@ -658,6 +707,10 @@ async def generate_projection_data(
                 _iso_df = _iso_df.drop(columns=["_alpha3_join"])
                 _iso_df.to_csv(scenario_human_emissions_path, index=False)
             except Exception as exc:
+                logger.exception(
+                    "Sanitation projection failed: session_id=%s gids=%s ssp=%s year=%s",
+                    session_id, projection_gids, ssp_norm, year,
+                )
                 raise HTTPException(status_code=500, detail=f"Failed to generate sanitation projection: {exc}")
 
             assumptions = await fetch_assumptions(["sanitation"])
@@ -678,6 +731,10 @@ async def generate_projection_data(
                 out_csv = scenario_dir / "treatment.csv"
                 treatment_df.to_csv(out_csv, index=False)
             except Exception as exc:
+                logger.exception(
+                    "Treatment projection failed: session_id=%s gids=%s ssp=%s year=%s",
+                    session_id, projection_gids, ssp_norm, year,
+                )
                 raise HTTPException(status_code=500, detail=f"Failed to generate treatment projection: {exc}")
 
             assumptions = await fetch_assumptions(["treatment_fractions"])
@@ -724,6 +781,10 @@ async def generate_projection_data(
                     **_LIVESTOCK_SUB_SCHEMA_PARAMS.get(_schema, {}),
                 )
             except Exception as exc:
+                logger.exception(
+                    "Livestock projection failed: session_id=%s gids=%s schema=%s ssp=%s year=%s",
+                    session_id, projection_gids, _schema, ssp_norm, year,
+                )
                 raise HTTPException(status_code=500, detail=f"Failed to generate livestock projection: {exc}")
 
             schema_results.append({
@@ -753,6 +814,10 @@ async def generate_projection_data(
                     climate_model=climate_model,
                 )
             except Exception as exc:
+                logger.exception(
+                    "Hydrology projection failed: session_id=%s gids=%s ssp=%s year=%s climate_model=%s",
+                    session_id, projection_gids, ssp_norm, year, climate_model,
+                )
                 raise HTTPException(
                     status_code=500,
                     detail=f"Failed to generate hydrology inputs: {exc}",
@@ -1265,6 +1330,15 @@ async def generate_input_data_package(session_id: str, gids: str, include_livest
     areas = [x.strip() for x in gids.split(",") if x.strip()]
 
     session_dir = _DATA_DIR / session_id
+    logger.info(
+        "Generating input package: session_id=%s gids=%s include_livestock=%s include_hydrology=%s include_qmra=%s climate_model=%s",
+        session_id,
+        areas,
+        include_livestock,
+        include_hydrology,
+        include_qmra,
+        climate_model,
+    )
 
     if os.path.isdir(session_dir):
         default_path = "baseline/"
@@ -1472,13 +1546,15 @@ async def generate_input_data_package(session_id: str, gids: str, include_livest
                     )
 
         except Exception as e:
-            import traceback
-            tb = traceback.format_exc()
-            logger.error("generate_input_data_package failed:\n%s", tb)
+            logger.exception(
+                "Input package generation failed: session_id=%s gids=%s",
+                session_id,
+                areas,
+            )
             raise HTTPException(
                 status_code=500,
-                detail=f"Failed to generate input data template files: {e}\n{tb}",
-            )
+                detail=f"Failed to generate input data template files: {e}",
+            ) from e
     else:
         raise HTTPException(status_code=500, detail="Invalid Session ID provided.")
     with open(str(session_dir / "datapackage.json")) as f:
