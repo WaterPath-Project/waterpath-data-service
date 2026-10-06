@@ -636,6 +636,12 @@ def generate_population_isoraster(
             f"Baseline population.csv not found at {isodata_path}. "
             "Run /input/generate first."
         )
+    template_path = session_dir / "baseline" / "human_emissions" / "isoraster.tif"
+    if not template_path.is_file():
+        raise FileNotFoundError(
+            f"Baseline isoraster.tif not found at {template_path}. "
+            "Run /input/generate first."
+        )
 
     scenario_dir.mkdir(parents=True, exist_ok=True)
 
@@ -649,6 +655,7 @@ def generate_population_isoraster(
         isodata_path=str(isodata_path),
         pop_raster_path=str(tif_path),
         out_dir=str(scenario_dir),
+        template_raster_path=str(template_path),
     )
 
     return Path(paths["isoraster"])
@@ -924,4 +931,3 @@ def update_human_emissions_population(
         human_emissions_path.name, len(zone_population),
         f"{sum(zone_population.values()):,}",
     )
-

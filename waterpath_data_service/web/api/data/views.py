@@ -1,6 +1,7 @@
 import json, logging, os, shutil, httpx, pandas as pd, io
 import zipfile
 from pathlib import Path
+import rasterio
 from waterpath_data_service.settings import settings
 from waterpath_data_service.services.geodata import geonames, shapefile, resample_raster, geofilter
 from waterpath_data_service.services.prepare_spatial import prepare_spatial_inputs
@@ -104,6 +105,46 @@ def _load_livestock_tabular_schema_fields() -> dict[str, set[str]]:
         if path.is_file():
             result[key] = read_schema_field_names(path)
     return result
+
+
+def _validate_generated_projection_grids(
+    reference_isoraster: Path,
+    scenario_dir: Path,
+) -> None:
+    with rasterio.open(reference_isoraster) as reference:
+        expected = (
+            reference.width,
+            reference.height,
+            reference.transform,
+            reference.crs,
+        )
+
+    candidates = [
+        scenario_dir / "isoraster.tif",
+        scenario_dir / "pop_urban.tif",
+        scenario_dir / "pop_rural.tif",
+        scenario_dir / "livestock_emissions" / "animal_isoraster.tif",
+        *(scenario_dir / "livestock_emissions" / "animals").glob("*_heads.tif"),
+    ]
+    mismatches: list[str] = []
+    for path in candidates:
+        if not path.is_file():
+            continue
+        with rasterio.open(path) as raster:
+            actual = (
+                raster.width,
+                raster.height,
+                raster.transform,
+                raster.crs,
+            )
+        if actual != expected:
+            mismatches.append(str(path.relative_to(scenario_dir)))
+
+    if mismatches:
+        raise ValueError(
+            "Generated projection rasters do not match the baseline isoraster grid: "
+            + ", ".join(mismatches)
+        )
 
 # Schema expansion: maps alias tokens to their constituent schema list.
 _SCHEMA_EXPANSION: dict[str, list[str]] = {
@@ -1377,6 +1418,8 @@ async def download_projection(
                     "n_areas": len(projected_df),
                 })
         summary = {"schemas": schema_entries, "assumptions": all_assumptions}
+
+        _validate_generated_projection_grids(reference_isoraster_path, scenario_dir)
 
         # Build the zip entirely in memory.
         zip_buffer = io.BytesIO()
