@@ -1157,7 +1157,11 @@ async def download_projection(
         is_country_level = all(len(str(g)) <= 3 for g in gids_list)
         alpha3_list = [str(g)[:3] for g in gids_list]
 
-        if "population" in schemas_to_generate:
+        _livestock_schema = next(
+            (s for s in schemas_to_generate if s.startswith("livestock_")), None
+        )
+        _needs_spatial_grid = "population" in schemas_to_generate or _livestock_schema is not None
+        if _needs_spatial_grid:
             from waterpath_data_service.services.projections import (
                 _population_tif_path,
             )
@@ -1166,18 +1170,24 @@ async def download_projection(
             except FileNotFoundError as exc:
                 raise HTTPException(status_code=500, detail=str(exc))
 
+            spatial_output_dir = (
+                scenario_dir
+                if "population" in schemas_to_generate
+                else tmp_path / "projection_grid"
+            )
             try:
                 paths = prepare_spatial_inputs(
                     geodata_path=str(shp_path),
                     isodata_path=str(baseline_csv_path),
                     pop_raster_path=str(tif_path),
-                    out_dir=str(scenario_dir),
+                    out_dir=str(spatial_output_dir),
                 )
             except Exception as exc:
                 raise HTTPException(status_code=500, detail=f"prepare_spatial_inputs failed: {exc}")
 
             isoraster_path = Path(paths["isoraster"])
 
+        if "population" in schemas_to_generate:
             try:
                 update_human_emissions_population(
                     human_emissions_path=projected_csv_path,
@@ -1231,9 +1241,6 @@ async def download_projection(
             treat_assumptions = await fetch_assumptions(["treatment_fractions"])
             all_assumptions.extend(treat_assumptions)
 
-        _livestock_schema = next(
-            (s for s in schemas_to_generate if s.startswith("livestock_")), None
-        )
         if _livestock_schema is not None:
             _ls_sub_params = _LIVESTOCK_SUB_SCHEMA_PARAMS.get(_livestock_schema, {})
             try:
@@ -1259,14 +1266,11 @@ async def download_projection(
                 generate_livestock_tabular_inputs(tmp_path, static_data_dir)
 
                 livestock_future_df_dl = await fetch_livestock_future_csv(alpha3_list, ssp_norm, year)
-                _scenario_isoraster = scenario_dir / "isoraster.tif"
                 _ls_zone_idx, _ls_valid_mask, _ls_zone_profile = _build_livestock_zone_template(
                     tmp_path,
                     static_data_dir,
                     _ls_mapping,
-                    reference_isoraster_path=(
-                        _scenario_isoraster if _scenario_isoraster.is_file() else None
-                    ),
+                    reference_isoraster_path=isoraster_path,
                 )
                 ls_result = generate_livestock_projection_rasters(
                     baseline_livestock_dir=_baseline_dir / "livestock_emissions",
