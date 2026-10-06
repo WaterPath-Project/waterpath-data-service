@@ -243,6 +243,7 @@ def _build_livestock_zone_template(
     session_dir: Path,
     static_data_dir: Path,
     mapping: pd.DataFrame,
+    reference_isoraster_path: Path | None = None,
 ) -> tuple[np.ndarray, np.ndarray, rasterio.profiles.Profile]:
     """Build the livestock zone grid, aligned to the case-study isoraster when available."""
     shapefile_path = _session_shapefile_path(session_dir)
@@ -271,7 +272,7 @@ def _build_livestock_zone_template(
     _MIN_GLW4_PIXELS = 4
     below_native = extent_x < _MIN_GLW4_PIXELS * glw4_native_res or extent_y < _MIN_GLW4_PIXELS * glw4_native_res
 
-    reference_path = _session_human_isoraster_path(session_dir)
+    reference_path = reference_isoraster_path or _session_human_isoraster_path(session_dir)
     if reference_path.is_file():
         with rasterio.open(reference_path) as ref:
             profile = ref.profile.copy()

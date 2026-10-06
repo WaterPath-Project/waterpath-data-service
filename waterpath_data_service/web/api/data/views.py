@@ -45,6 +45,51 @@ _DATA_DIR: Path = settings.data_dir
 # Static assets (schemas, look-up tables) – always bundled with the container image.
 _STATIC_DIR: Path = Path(__file__).parent.parent.parent.parent / "static"
 
+
+async def _persist_fine_flow_direction(
+    upload: UploadFile | None,
+    session_dir: Path,
+) -> Path | None:
+    destination = session_dir / "baseline" / "hydrology" / "fine_flowdir_source.tif"
+    if upload is None:
+        return destination if destination.is_file() else None
+    try:
+        contents = await upload.read()
+        if not contents:
+            raise HTTPException(status_code=400, detail="Uploaded flow-direction TIFF is empty.")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(contents)
+        return destination
+    finally:
+        await upload.close()
+
+
+def _generate_baseline_livestock_temperature(
+    include_livestock: bool,
+    geodata_shp: Path,
+    human_emissions_output_path: Path,
+    session_dir: Path,
+) -> None:
+    if not include_livestock or not geodata_shp.is_file():
+        return
+    try:
+        baseline_temperature = _baseline_temperature_path(_STATIC_DIR / "data")
+        template_raster = human_emissions_output_path / "isoraster.tif"
+        generate_temperature_tif(
+            shapefile_path=geodata_shp,
+            source_raster_path=baseline_temperature,
+            out_dir=session_dir / "baseline" / "livestock_emissions",
+            template_raster_path=template_raster if template_raster.is_file() else None,
+        )
+    except FileNotFoundError:
+        pass
+    except Exception as temperature_error:
+        logger.warning(
+            "Baseline temperature clip failed for session %s: %s",
+            session_dir.name,
+            temperature_error,
+        )
+
 # Field sets read from the livestock schema files, used to constrain which
 # columns from livestock_future.csv are applied to each output CSV.
 def _load_livestock_tabular_schema_fields() -> dict[str, set[str]]:
@@ -545,6 +590,22 @@ async def generate_projection_data(
         ),
         examples=["GFDL-ESM4"],
     ),
+    hydrology_downscaling: bool = Query(
+        False,
+        description=(
+            "Enable experimental hydrology downscaling. Without a fine flow-direction TIFF, "
+            "only runoff and continuous fields are smoothed; discharge/routing remain coarse-derived."
+        ),
+    ),
+    hydrology_flow_direction_tif: UploadFile | None = File(
+        None,
+        description=(
+            "Optional model-grid HydroSHEDS/ESRI D8 flow-direction GeoTIFF using codes "
+            "0,1,2,4,8,16,32,64,128. Raw finer data must first be network-aggregated "
+            "with flow accumulation; categorical resampling can create cycles. Retained "
+            "with the baseline for later projections."
+        ),
+    ),
 ):
     """Generate projected data for a given schema, year, and SSP scenario."""
 
@@ -614,6 +675,10 @@ async def generate_projection_data(
     scenario_folder_name = f"{ssp_norm}_{year}"
     scenario_dir = session_dir / "scenarios" / scenario_folder_name
     scenario_dir.mkdir(parents=True, exist_ok=True)
+    fine_flow_direction_path = await _persist_fine_flow_direction(
+        hydrology_flow_direction_tif,
+        session_dir,
+    )
 
     # Ensure we always have scenario-local isodata.csv available.
     baseline_human_emissions_path = ensure_human_emissions_csv(session_id)
@@ -766,8 +831,14 @@ async def generate_projection_data(
 
                 livestock_future_df = await fetch_livestock_future_csv(_alpha3_list, ssp_norm, year)
                 _mapping = _load_iso_gid_mapping(session_dir)
+                _scenario_isoraster = scenario_dir / "isoraster.tif"
                 _zone_idx, _valid_mask, _zone_profile = _build_livestock_zone_template(
-                    session_dir, static_data_dir, _mapping
+                    session_dir,
+                    static_data_dir,
+                    _mapping,
+                    reference_isoraster_path=(
+                        _scenario_isoraster if _scenario_isoraster.is_file() else None
+                    ),
                 )
                 ls_result = generate_livestock_projection_rasters(
                     baseline_livestock_dir=baseline_livestock_dir,
@@ -812,6 +883,8 @@ async def generate_projection_data(
                     year=year,
                     reference_raster_path=_hydro_ref if _hydro_ref.is_file() else None,
                     climate_model=climate_model,
+                    hydrology_downscaling=hydrology_downscaling,
+                    fine_flow_direction_path=fine_flow_direction_path,
                 )
             except Exception as exc:
                 logger.exception(
@@ -827,6 +900,7 @@ async def generate_projection_data(
                 "hydrology_dir": hydro_result["hydrology_dir"],
                 "model": hydro_result["model"],
                 "variables": list(hydro_result["variables"]),
+                "downscaling": hydro_result["downscaling"],
                 "assumptions_csv": hydro_result.get("assumptions_csv"),
             })
 
@@ -1185,8 +1259,14 @@ async def download_projection(
                 generate_livestock_tabular_inputs(tmp_path, static_data_dir)
 
                 livestock_future_df_dl = await fetch_livestock_future_csv(alpha3_list, ssp_norm, year)
+                _scenario_isoraster = scenario_dir / "isoraster.tif"
                 _ls_zone_idx, _ls_valid_mask, _ls_zone_profile = _build_livestock_zone_template(
-                    tmp_path, static_data_dir, _ls_mapping
+                    tmp_path,
+                    static_data_dir,
+                    _ls_mapping,
+                    reference_isoraster_path=(
+                        _scenario_isoraster if _scenario_isoraster.is_file() else None
+                    ),
                 )
                 ls_result = generate_livestock_projection_rasters(
                     baseline_livestock_dir=_baseline_dir / "livestock_emissions",
@@ -1326,7 +1406,29 @@ async def download_projection(
 
 
 @router.post("/input/generate")
-async def generate_input_data_package(session_id: str, gids: str, include_livestock: bool = False, include_hydrology: bool = False, include_qmra: bool = False, climate_model: str | None = Query(None, description="ISIMIP3b climate model name for baseline hydrology inputs (e.g. 'GFDL-ESM4'). Only applies when include_hydrology=true. When omitted, the first available model is used. Use GET /projections/climate-models to list available models.", examples=["GFDL-ESM4"])):
+async def generate_input_data_package(
+    session_id: str,
+    gids: str,
+    include_livestock: bool = False,
+    include_hydrology: bool = False,
+    include_qmra: bool = False,
+    climate_model: str | None = Query(None, description="ISIMIP3b climate model name for baseline hydrology inputs (e.g. 'GFDL-ESM4'). Only applies when include_hydrology=true. When omitted, the first available model is used. Use GET /projections/climate-models to list available models.", examples=["GFDL-ESM4"]),
+    hydrology_downscaling: bool = Query(
+        False,
+        description=(
+            "Enable experimental hydrology downscaling. Without a fine flow-direction TIFF, "
+            "only runoff and continuous fields are smoothed; discharge/routing remain coarse-derived."
+        ),
+    ),
+    hydrology_flow_direction_tif: UploadFile | None = File(
+        None,
+        description=(
+            "Optional model-grid HydroSHEDS/ESRI D8 flow-direction GeoTIFF using codes "
+            "0,1,2,4,8,16,32,64,128. Raw finer data must first be network-aggregated "
+            "with flow accumulation; categorical resampling can create cycles."
+        ),
+    ),
+):
     areas = [x.strip() for x in gids.split(",") if x.strip()]
 
     session_dir = _DATA_DIR / session_id
@@ -1341,6 +1443,10 @@ async def generate_input_data_package(session_id: str, gids: str, include_livest
     )
 
     if os.path.isdir(session_dir):
+        fine_flow_direction_path = await _persist_fine_flow_direction(
+            hydrology_flow_direction_tif,
+            session_dir,
+        )
         default_path = "baseline/"
         schemas_path = "schemas/"
         # Note: schemas are stored in the session folder so the generated
@@ -1441,6 +1547,7 @@ async def generate_input_data_package(session_id: str, gids: str, include_livest
             geodata_shp = session_dir / default_path / "geodata" / "geodata.shp"
             isodata_csv = human_emissions_output_path / "population.csv"
             pop_raster = _STATIC_DIR / "data" / "worldpop_2025" / "global_pop_2025_CN_1km_R2025A_UA_v1.tif"
+            _template_raster = human_emissions_output_path / "isoraster.tif"
 
             if geodata_shp.is_file() and isodata_csv.is_file() and pop_raster.is_file():
                 try:
@@ -1456,24 +1563,12 @@ async def generate_input_data_package(session_id: str, gids: str, include_livest
                         "prepare_spatial_inputs failed for session %s: %s", session_id, spatial_err
                     )
 
-            # Clip baseline temperature raster to the study area.
-            if geodata_shp.is_file():
-                try:
-                    _baseline_temp = _baseline_temperature_path(_STATIC_DIR / "data")
-                    _template_raster = human_emissions_output_path / "isoraster.tif"
-                    generate_temperature_tif(
-                        shapefile_path=geodata_shp,
-                        source_raster_path=_baseline_temp,
-                        out_dir=session_dir / default_path / "livestock_emissions",
-                        template_raster_path=_template_raster if _template_raster.is_file() else None,
-                    )
-                except FileNotFoundError:
-                    pass  # vic_watch ASC not present — skip silently
-                except Exception as _temp_err:
-                    logger.warning(
-                        "Baseline temperature clip failed for session %s: %s",
-                        session_id, _temp_err,
-                    )
+            _generate_baseline_livestock_temperature(
+                include_livestock=include_livestock,
+                geodata_shp=geodata_shp,
+                human_emissions_output_path=human_emissions_output_path,
+                session_dir=session_dir,
+            )
 
             # Clip baseline hydrology rasters to the study area.
             if include_hydrology and geodata_shp.is_file():
@@ -1484,12 +1579,18 @@ async def generate_input_data_package(session_id: str, gids: str, include_livest
                         out_dir=session_dir / default_path,
                         climate_model=climate_model,
                         reference_raster_path=_template_raster if _template_raster.is_file() else None,
+                        hydrology_downscaling=hydrology_downscaling,
+                        fine_flow_direction_path=fine_flow_direction_path,
                     )
                 except Exception as _hydro_err:
-                    logger.warning(
-                        "Baseline hydrology generation failed for session %s: %s",
-                        session_id, _hydro_err,
+                    logger.exception(
+                        "Baseline hydrology generation failed for session %s",
+                        session_id,
                     )
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Failed to generate baseline hydrology: {_hydro_err}",
+                    ) from _hydro_err
 
             # Generate baseline QMRA treatment map. Coupled to hydrology: the
             # QMRA run overlays this drinking-water map on the hydrology /

@@ -100,6 +100,23 @@ _HYDRO_NATIVE_RES_DEG: float = 0.5
 # generation still succeeds (uniform coarse values) rather than being blocked.
 _MIN_HYDRO_CELLS: int = 4
 
+_D8_OFFSETS: dict[int, tuple[int, int]] = {
+    1: (0, 1),
+    2: (1, 1),
+    4: (1, 0),
+    8: (1, -1),
+    16: (0, -1),
+    32: (-1, -1),
+    64: (-1, 0),
+    128: (-1, 1),
+}
+
+_DEPTH_A = 0.34
+_DEPTH_B = 0.341
+_VELOCITY_A = 0.19
+_VELOCITY_B = 0.266
+_EARTH_RADIUS_M = 6_371_003.0
+
 # Regex to parse model directory names: anything_{ssp_code}_{start}_{end}
 _MODEL_DIR_RE = re.compile(r"^.+_(ssp\d+)_(\d{4})_(\d{4})$")
 
@@ -251,7 +268,13 @@ def _baseline_model_dir(
 # Clipping helpers
 # ---------------------------------------------------------------------------
 
-def _clip_raster(src_path: Path, shapes: list, out_path: Path, reference_path: Path | None = None) -> None:
+def _clip_raster(
+    src_path: Path,
+    shapes: list,
+    out_path: Path,
+    reference_path: Path | None = None,
+    resampling: Resampling = Resampling.nearest,
+) -> None:
     """Clip *src_path* to *shapes* and write a compressed GeoTIFF to *out_path*.
 
     Parameters
@@ -362,17 +385,7 @@ def _clip_raster(src_path: Path, shapes: list, out_path: Path, reference_path: P
                         dst_transform=ref.transform,
                         dst_crs=ref_crs,
                         dst_nodata=nodata,
-                        # Nearest-neighbour, NOT bilinear.  The hydrology source
-                        # (0.5°) is always coarser than the isoraster grid, so
-                        # this step is pure coarse->fine upsampling.  Bilinear
-                        # would blend in neighbouring cells and propagate the
-                        # nodata (-inf / -9999) of the sparse river grid,
-                        # over-estimating values near edges and fabricating
-                        # gradients that do not exist in the data.  Nearest
-                        # copies each destination pixel from the single coarse
-                        # cell it falls in: honest uniform blocks, no neighbour
-                        # or empty-cell contamination.
-                        resampling=Resampling.nearest,
+                        resampling=resampling,
                     )
                 clipped = aligned
                 out_meta.update(
@@ -386,6 +399,175 @@ def _clip_raster(src_path: Path, shapes: list, out_path: Path, reference_path: P
 
         with rasterio.open(out_path, "w", **out_meta) as dst:
             dst.write(clipped)
+
+
+def _pixel_area_km2(transform, height: int, width: int) -> np.ndarray:
+    resolution = abs(transform.a)
+    latitudes = transform.f + (np.arange(height) + 0.5) * transform.e
+    row_areas = (resolution * 111.32) ** 2 * np.cos(np.deg2rad(latitudes))
+    return np.broadcast_to(row_areas[:, np.newaxis], (height, width)).astype(np.float64)
+
+
+def _conserve_runoff_by_source_cell(source_path: Path, downscaled_path: Path) -> None:
+    """Preserve each represented coarse cell's area-weighted runoff depth."""
+    with rasterio.open(source_path) as source, rasterio.open(downscaled_path, "r+") as target:
+        source_values = source.read(1).astype(np.float64)
+        target_values = target.read(1).astype(np.float64)
+        source_nodata = source.nodata
+        target_nodata = target.nodata
+
+        rows, columns = np.indices(target_values.shape)
+        xs, ys = rasterio.transform.xy(target.transform, rows, columns, offset="center")
+        source_rows, source_columns = rasterio.transform.rowcol(
+            source.transform,
+            np.asarray(xs).ravel(),
+            np.asarray(ys).ravel(),
+        )
+        source_rows = np.asarray(source_rows)
+        source_columns = np.asarray(source_columns)
+        inside = (
+            (source_rows >= 0)
+            & (source_rows < source.height)
+            & (source_columns >= 0)
+            & (source_columns < source.width)
+        )
+
+        flat_target = target_values.ravel()
+        valid_target = np.isfinite(flat_target)
+        if target_nodata is not None and np.isfinite(target_nodata):
+            valid_target &= flat_target != target_nodata
+
+        source_flat_index = source_rows * source.width + source_columns
+        source_depth = np.full(flat_target.shape, np.nan, dtype=np.float64)
+        source_depth[inside] = source_values.ravel()[source_flat_index[inside]]
+        valid = inside & valid_target & np.isfinite(source_depth)
+        if source_nodata is not None and np.isfinite(source_nodata):
+            valid &= source_depth != source_nodata
+
+        target_areas = _pixel_area_km2(target.transform, target.height, target.width).ravel()
+        group_count = source.height * source.width
+        represented_area = np.bincount(
+            source_flat_index[valid], weights=target_areas[valid], minlength=group_count
+        )
+        interpolated_volume = np.bincount(
+            source_flat_index[valid],
+            weights=flat_target[valid] * target_areas[valid],
+            minlength=group_count,
+        )
+        expected_volume = source_values.ravel() * represented_area
+        factors = np.ones(group_count, dtype=np.float64)
+        scalable = np.isfinite(expected_volume) & (interpolated_volume > 0)
+        factors[scalable] = expected_volume[scalable] / interpolated_volume[scalable]
+        flat_target[valid] *= factors[source_flat_index[valid]]
+        target.write(flat_target.reshape(target_values.shape).astype(target.dtypes[0]), 1)
+
+
+def _d8_network(flow_direction: np.ndarray, valid_mask: np.ndarray) -> tuple[np.ndarray, list[int]]:
+    height, width = flow_direction.shape
+    downstream = np.full(height * width, -1, dtype=np.int64)
+    indegree = np.zeros(height * width, dtype=np.int32)
+    valid_flat = valid_mask.ravel()
+
+    for code, (row_offset, column_offset) in _D8_OFFSETS.items():
+        source_rows, source_columns = np.where(valid_mask & (flow_direction == code))
+        destination_rows = source_rows + row_offset
+        destination_columns = source_columns + column_offset
+        inside = (
+            (destination_rows >= 0)
+            & (destination_rows < height)
+            & (destination_columns >= 0)
+            & (destination_columns < width)
+        )
+        source_index = source_rows[inside] * width + source_columns[inside]
+        destination_index = destination_rows[inside] * width + destination_columns[inside]
+        connected = valid_flat[destination_index]
+        source_index = source_index[connected]
+        destination_index = destination_index[connected]
+        downstream[source_index] = destination_index
+        np.add.at(indegree, destination_index, 1)
+
+    queue = list(np.flatnonzero(valid_flat & (indegree == 0)))
+    order: list[int] = []
+    cursor = 0
+    while cursor < len(queue):
+        cell = queue[cursor]
+        cursor += 1
+        order.append(cell)
+        destination = downstream[cell]
+        if destination >= 0:
+            indegree[destination] -= 1
+            if indegree[destination] == 0:
+                queue.append(int(destination))
+
+    if len(order) != int(valid_flat.sum()):
+        raise ValueError("Fine flow-direction raster contains a cycle inside the case-study domain.")
+    return downstream, order
+
+
+def _flow_accumulation(downstream: np.ndarray, order: list[int], shape: tuple[int, int]) -> np.ndarray:
+    accumulation = np.ones(downstream.size, dtype=np.int32)
+    for cell in order:
+        destination = downstream[cell]
+        if destination >= 0:
+            accumulation[destination] += accumulation[cell]
+    return accumulation.reshape(shape)
+
+
+def _route_runoff(runoff_path: Path, downstream: np.ndarray, order: list[int]) -> np.ndarray:
+    with rasterio.open(runoff_path) as source:
+        runoff = source.read(1).astype(np.float64)
+        areas = _pixel_area_km2(source.transform, source.height, source.width)
+        local_discharge = np.where(np.isfinite(runoff), runoff * areas / 86.4, 0.0).ravel()
+    discharge = local_discharge.copy()
+    for cell in order:
+        destination = downstream[cell]
+        if destination >= 0:
+            discharge[destination] += discharge[cell]
+    return discharge.reshape(runoff.shape).astype(np.float32)
+
+
+def _derive_hydraulics(
+    discharge: np.ndarray,
+    flow_direction: np.ndarray,
+    transform,
+) -> tuple[np.ndarray, np.ndarray]:
+    depth = np.where(discharge > 0, _DEPTH_A * discharge ** _DEPTH_B, np.nan).astype(np.float32)
+    residence_time = np.full(discharge.shape, np.nan, dtype=np.float32)
+    latitudes = transform.f + (np.arange(discharge.shape[0]) + 0.5) * transform.e
+    longitudes = transform.c + (np.arange(discharge.shape[1]) + 0.5) * transform.a
+
+    for code, (row_offset, column_offset) in _D8_OFFSETS.items():
+        rows, columns = np.where((flow_direction == code) & (discharge > 0))
+        next_rows = rows + row_offset
+        next_columns = columns + column_offset
+        inside = (
+            (next_rows >= 0)
+            & (next_rows < discharge.shape[0])
+            & (next_columns >= 0)
+            & (next_columns < discharge.shape[1])
+        )
+        rows, columns = rows[inside], columns[inside]
+        next_rows, next_columns = next_rows[inside], next_columns[inside]
+        lat1 = np.deg2rad(latitudes[rows])
+        lat2 = np.deg2rad(latitudes[next_rows])
+        lon1 = np.deg2rad(longitudes[columns])
+        lon2 = np.deg2rad(longitudes[next_columns])
+        haversine = np.sin((lat2 - lat1) / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin((lon2 - lon1) / 2) ** 2
+        distances = 2 * _EARTH_RADIUS_M * np.arcsin(np.sqrt(np.clip(haversine, 0, 1)))
+        velocity = np.maximum(_VELOCITY_A * discharge[rows, columns] ** _VELOCITY_B, 0.01)
+        residence_time[rows, columns] = distances / (velocity * 86_400.0)
+    return depth, residence_time
+
+
+def _write_array_like(reference_path: Path, output_path: Path, values: np.ndarray, dtype: str = "float32") -> None:
+    with rasterio.open(reference_path) as reference:
+        profile = reference.profile.copy()
+    nodata = np.nan if dtype.startswith("float") else np.iinfo(np.dtype(dtype)).min
+    profile.update(dtype=dtype, count=1, nodata=nodata, compress="lzw")
+    output_values = np.where(np.isfinite(values), values, nodata).astype(dtype)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with rasterio.open(output_path, "w", **profile) as output:
+        output.write(output_values, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -632,6 +814,8 @@ def generate_hydrology_inputs(
     year: int | None = None,
     reference_raster_path: str | Path | None = None,
     climate_model: str | None = None,
+    hydrology_downscaling: bool = False,
+    fine_flow_direction_path: str | Path | None = None,
 ) -> dict:
     """Clip hydrology inputs to the study area and write to ``out_dir/hydrology/``.
 
@@ -666,6 +850,23 @@ def generate_hydrology_inputs(
     static_data_dir = Path(static_data_dir)
     out_dir = Path(out_dir)
     reference_raster_path = Path(reference_raster_path) if reference_raster_path else None
+    fine_flow_direction_path = Path(fine_flow_direction_path) if fine_flow_direction_path else None
+
+    if hydrology_downscaling and (
+        reference_raster_path is None or not reference_raster_path.is_file()
+    ):
+        raise ValueError("hydrology_downscaling requires a case-study reference isoraster.")
+    if fine_flow_direction_path is not None and not hydrology_downscaling:
+        logger.warning("Ignoring fine flow-direction raster because hydrology_downscaling is disabled.")
+        fine_flow_direction_path = None
+    if fine_flow_direction_path is not None and not fine_flow_direction_path.is_file():
+        raise FileNotFoundError(f"Fine flow-direction raster not found: {fine_flow_direction_path}")
+    if fine_flow_direction_path is not None:
+        with rasterio.open(fine_flow_direction_path) as fine_flow_source:
+            if abs(fine_flow_source.transform.a) >= _HYDRO_NATIVE_RES_DEG:
+                raise ValueError(
+                    "Fine flow-direction raster must have a resolution finer than 0.5 degrees."
+                )
 
     hydrology_static_dir = static_data_dir / "hydrology"
 
@@ -699,7 +900,11 @@ def generate_hydrology_inputs(
         "variables": {},
         "routing": {},
         "doc": None,
+        "downscaling": "disabled",
     }
+
+    if hydrology_downscaling:
+        result["downscaling"] = "fine_d8" if fine_flow_direction_path else "continuous_fields_only"
 
     # ------------------------------------------------------------------
     # Clip monthly variable rasters
@@ -735,7 +940,22 @@ def generate_hydrology_inputs(
         for tif_path, out_name in zip(monthly_sources, canonical_files, strict=True):
             out_tif = var_out_dir / out_name
             try:
-                _clip_raster(tif_path, shapes, out_tif, reference_path=reference_raster_path)
+                smooth_variable = hydrology_downscaling and var_dir_name in {
+                    "runoff",
+                    "river_depth",
+                    "river_restime",
+                    "ssrd",
+                    "river_temperature",
+                }
+                _clip_raster(
+                    tif_path,
+                    shapes,
+                    out_tif,
+                    reference_path=reference_raster_path,
+                    resampling=Resampling.bilinear if smooth_variable else Resampling.nearest,
+                )
+                if hydrology_downscaling and var_dir_name == "runoff":
+                    _conserve_runoff_by_source_cell(tif_path, out_tif)
                 clipped_files.append(out_name)
             except Exception as exc:
                 logger.warning("Failed to clip %s: %s", tif_path, exc)
@@ -777,9 +997,50 @@ def generate_hydrology_inputs(
     # Clip routing rasters
     # ------------------------------------------------------------------
     routing_src_dir = hydrology_static_dir / "routing"
-    if routing_src_dir.is_dir():
-        routing_out_dir = out_hydrology_dir / "routing"
-        routing_out_dir.mkdir(parents=True, exist_ok=True)
+    routing_out_dir = out_hydrology_dir / "routing"
+    routing_out_dir.mkdir(parents=True, exist_ok=True)
+    fine_flow_direction: np.ndarray | None = None
+    fine_downstream: np.ndarray | None = None
+    fine_order: list[int] | None = None
+    if fine_flow_direction_path is not None:
+        flow_direction_out = routing_out_dir / "flowdir.tif"
+        _clip_raster(
+            fine_flow_direction_path,
+            shapes,
+            flow_direction_out,
+            reference_path=reference_raster_path,
+            resampling=Resampling.nearest,
+        )
+        with rasterio.open(flow_direction_out) as flow_source, rasterio.open(reference_raster_path) as reference:
+            fine_flow_direction = flow_source.read(1).astype(np.float32)
+            flow_nodata = flow_source.nodata
+            reference_values = reference.read(1, masked=True)
+            domain_mask = (~np.ma.getmaskarray(reference_values)) & (reference_values.filled(0) != 0)
+        edge_nodata = domain_mask & ~np.isfinite(fine_flow_direction)
+        if flow_nodata is not None and np.isfinite(flow_nodata):
+            edge_nodata |= domain_mask & (fine_flow_direction == flow_nodata)
+        fine_flow_direction[edge_nodata] = 0
+        allowed_codes = np.array([0, *_D8_OFFSETS], dtype=np.float32)
+        invalid_codes = np.unique(fine_flow_direction[domain_mask & ~np.isin(fine_flow_direction, allowed_codes)])
+        if invalid_codes.size:
+            raise ValueError(
+                "Fine flow-direction raster must use HydroSHEDS/ESRI D8 codes "
+                f"0,1,2,4,8,16,32,64,128; found {invalid_codes[:10].tolist()}."
+            )
+        fine_flow_direction[~domain_mask] = np.nan
+        _write_array_like(reference_raster_path, flow_direction_out, fine_flow_direction)
+        fine_downstream, fine_order = _d8_network(fine_flow_direction, domain_mask)
+        fine_flow_accumulation = _flow_accumulation(
+            fine_downstream, fine_order, fine_flow_direction.shape
+        ).astype(np.float32)
+        fine_flow_accumulation[~domain_mask] = np.nan
+        flow_accumulation_out = routing_out_dir / "flowacc.tif"
+        _write_array_like(reference_raster_path, flow_accumulation_out, fine_flow_accumulation)
+        result["routing"] = {
+            "flowdir.tif": str(flow_direction_out),
+            "flowacc.tif": str(flow_accumulation_out),
+        }
+    elif routing_src_dir.is_dir():
         for fname in _ROUTING_FILES:
             src = routing_src_dir / fname
             if src.is_file():
@@ -790,6 +1051,23 @@ def generate_hydrology_inputs(
                 except Exception as exc:
                     logger.warning("Failed to clip routing file '%s': %s", src, exc)
 
+    if fine_flow_direction is not None and fine_downstream is not None and fine_order is not None:
+        for month in range(1, 13):
+            runoff_path = out_hydrology_dir / "runoff" / f"runoff_m{month:02d}.tif"
+            discharge_path = out_hydrology_dir / "discharge" / f"discharge_m{month:02d}.tif"
+            depth_path = out_hydrology_dir / "river_depth" / f"river_depth_m{month:02d}.tif"
+            residence_time_path = out_hydrology_dir / "river_restime" / f"river_restime_m{month:02d}.tif"
+            discharge = _route_runoff(runoff_path, fine_downstream, fine_order)
+            discharge[~np.isfinite(fine_flow_direction)] = np.nan
+            with rasterio.open(reference_raster_path) as reference:
+                reference_transform = reference.transform
+            depth, residence_time = _derive_hydraulics(
+                discharge, fine_flow_direction, reference_transform
+            )
+            _write_array_like(reference_raster_path, discharge_path, discharge)
+            _write_array_like(reference_raster_path, depth_path, depth)
+            _write_array_like(reference_raster_path, residence_time_path, residence_time)
+
     # ------------------------------------------------------------------
     # Clip DOC raster
     # ------------------------------------------------------------------
@@ -797,7 +1075,13 @@ def generate_hydrology_inputs(
     if doc_src.is_file():
         out_doc = out_hydrology_dir / "doc.tif"
         try:
-            _clip_raster(doc_src, shapes, out_doc, reference_path=reference_raster_path)
+            _clip_raster(
+                doc_src,
+                shapes,
+                out_doc,
+                reference_path=reference_raster_path,
+                resampling=Resampling.bilinear if hydrology_downscaling else Resampling.nearest,
+            )
             result["doc"] = str(out_doc)
         except Exception as exc:
             logger.warning("Failed to clip DOC raster: %s", exc)
@@ -838,6 +1122,26 @@ def generate_hydrology_inputs(
             },
         ]
 
+        if hydrology_downscaling:
+            assumptions_rows.append({
+                "id": "hydrology_downscaling",
+                "scenario": ssp_requested,
+                "year": str(year) if year else "baseline",
+                "admin_level": "all",
+                "pathogen": "all",
+                "assumption": (
+                    "Experimental hydrology downscaling enabled. Runoff was bilinearly interpolated "
+                    "with per-source-cell area-weighted volume correction. A supplied fine D8 network "
+                    "was used to derive matching flow accumulation, discharge, river depth, and "
+                    "residence time."
+                    if fine_flow_direction_path is not None
+                    else "Experimental partial hydrology downscaling enabled without a fine D8 network. "
+                    "Runoff was bilinearly interpolated with per-source-cell area-weighted volume "
+                    "correction; continuous environmental fields were smoothed, while discharge and "
+                    "routing retain the coarse source information."
+                ),
+            })
+
         if _below_native_res:
             assumptions_rows.append({
                 "id": "hydrology_resolution",
@@ -849,11 +1153,15 @@ def generate_hydrology_inputs(
                     f"Study area extent ({_extent_lon:.3f}\u00b0 x {_extent_lat:.3f}\u00b0) is "
                     f"smaller than {_MIN_HYDRO_CELLS} native hydrology cells "
                     f"({_HYDRO_NATIVE_RES_DEG}\u00b0 / ~55 km, ISIMIP3b). Clipped rasters are "
-                    "reprojected to the isoraster grid with nearest-neighbour "
-                    "resampling, so hydrology values are uniform (coarse) blocks "
-                    "copied from the overlapping source cell(s) and do not resolve "
-                    "sub-cell spatial variation. QMRA outputs derived from these "
-                    "rasters inherit the same resolution limitation."
+                    + (
+                        "downscaled experimentally as described in the hydrology_downscaling assumption. "
+                        "Sub-cell detail is modeled rather than observed."
+                        if hydrology_downscaling
+                        else "reprojected to the isoraster grid with nearest-neighbour resampling, so "
+                        "hydrology values are uniform (coarse) blocks copied from the overlapping source "
+                        "cell(s) and do not resolve sub-cell spatial variation. QMRA outputs derived from "
+                        "these rasters inherit the same resolution limitation."
+                    )
                 ),
             })
 

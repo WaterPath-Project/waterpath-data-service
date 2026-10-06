@@ -97,6 +97,51 @@ def test_livestock_zone_template_matches_human_isoraster_for_large_area(
     assert result_profile["crs"] == rasterio.crs.CRS.from_epsg(4326)
 
 
+def test_livestock_zone_template_prefers_projection_isoraster(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_dir = tmp_path / "case"
+    shapefile = session_dir / "baseline" / "geodata" / "geodata.shp"
+    shapefile.parent.mkdir(parents=True)
+    shapefile.touch()
+
+    baseline_reference = session_dir / "baseline" / "human_emissions" / "isoraster.tif"
+    baseline_reference.parent.mkdir(parents=True)
+    with rasterio.open(baseline_reference, "w", **_fine_grid_profile()) as dst:
+        dst.write(np.ones((4, 4), dtype=np.float32), 1)
+
+    projection_reference = session_dir / "scenarios" / "SSP1_2050" / "isoraster.tif"
+    projection_reference.parent.mkdir(parents=True)
+    projection_profile = {
+        **_fine_grid_profile(),
+        "width": 3,
+        "height": 2,
+        "transform": from_origin(1.0, 2.0, 0.05, 0.05),
+    }
+    with rasterio.open(projection_reference, "w", **projection_profile) as dst:
+        dst.write(np.ones((2, 3), dtype=np.float32), 1)
+
+    features = pd.DataFrame({"GID_0": ["TST"]})
+    features["geometry"] = None
+    features.at[0, "geometry"] = box(1.0, 1.9, 1.15, 2.0)
+    features.__dict__["total_bounds"] = np.array([1.0, 1.9, 1.15, 2.0])
+    monkeypatch.setattr(livestock.pyogrio, "read_dataframe", lambda _: features)
+    monkeypatch.setattr(livestock, "_native_tif_resolution", lambda _: 0.1)
+
+    zone_idx, _, result_profile = _build_livestock_zone_template(
+        session_dir,
+        tmp_path / "static",
+        pd.DataFrame({"gid": ["TST"], "iso": [1]}),
+        reference_isoraster_path=projection_reference,
+    )
+
+    assert zone_idx.shape == (2, 3)
+    assert result_profile["width"] == projection_profile["width"]
+    assert result_profile["height"] == projection_profile["height"]
+    assert result_profile["transform"] == projection_profile["transform"]
+
+
 def test_fao_country_total_returns_matching_value() -> None:
     fao = pd.DataFrame(
         {

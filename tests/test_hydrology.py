@@ -1,9 +1,61 @@
 from pathlib import Path
 
+import numpy as np
 import rasterio
 from affine import Affine
+from rasterio.transform import from_origin
 
 from waterpath_data_service.services import hydrology
+
+
+def _write_test_raster(
+    path: Path,
+    values: np.ndarray,
+    transform: Affine,
+) -> None:
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        width=values.shape[1],
+        height=values.shape[0],
+        count=1,
+        dtype="float32",
+        crs="EPSG:4326",
+        transform=transform,
+        nodata=np.nan,
+    ) as destination:
+        destination.write(values.astype(np.float32), 1)
+
+
+def test_runoff_correction_preserves_area_weighted_coarse_depth(tmp_path: Path) -> None:
+    source = tmp_path / "source.tif"
+    downscaled = tmp_path / "downscaled.tif"
+    _write_test_raster(source, np.array([[10.0]]), from_origin(0.0, 0.1, 0.1, 0.1))
+    _write_test_raster(
+        downscaled,
+        np.arange(1, 17, dtype=np.float32).reshape(4, 4),
+        from_origin(0.0, 0.1, 0.025, 0.025),
+    )
+
+    hydrology._conserve_runoff_by_source_cell(source, downscaled)
+
+    with rasterio.open(downscaled) as result:
+        values = result.read(1)
+        areas = hydrology._pixel_area_km2(result.transform, result.height, result.width)
+    np.testing.assert_allclose(np.average(values, weights=areas), 10.0, rtol=1e-6)
+
+
+def test_d8_flow_accumulation_counts_upstream_cells() -> None:
+    flow_direction = np.array([[1.0, 1.0, 0.0]], dtype=np.float32)
+    downstream, order = hydrology._d8_network(
+        flow_direction,
+        np.ones(flow_direction.shape, dtype=bool),
+    )
+
+    result = hydrology._flow_accumulation(downstream, order, flow_direction.shape)
+
+    np.testing.assert_array_equal(result, np.array([[1, 2, 3]], dtype=np.int32))
 
 
 def test_canonical_hydrology_filenames_cover_each_month() -> None:
