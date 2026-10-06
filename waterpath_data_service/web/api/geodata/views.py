@@ -1,4 +1,5 @@
 import io, os, pandas as pd, json
+from functools import lru_cache
 from pathlib import Path
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
@@ -39,6 +40,8 @@ _NO_CACHE_HEADERS = {
     "Pragma": "no-cache",
     "Expires": "0",
 }
+_DEFAULT_SIMPLIFY_TOLERANCE = 0.005
+_GEOJSON_COORDINATE_PRECISION = 5
 
 
 def _preview_data_dir(
@@ -174,7 +177,18 @@ async def polygons(admin: str, level: int) -> JSONResponse:
 
 
 @router.post("/get-geometries")
-def get_geometries(gadm_ids: list[str]) -> JSONResponse:
+def get_geometries(
+    gadm_ids: list[str],
+    simplify_tolerance: float = Query(
+        _DEFAULT_SIMPLIFY_TOLERANCE,
+        ge=0,
+        le=0.1,
+        description=(
+            "Topology-preserving simplification tolerance in degrees. "
+            "Use 0 for the original GADM geometry."
+        ),
+    ),
+) -> JSONResponse:
     if not gadm_ids:
         raise HTTPException(status_code=422, detail="At least one GADM ID is required.")
 
@@ -188,8 +202,9 @@ def get_geometries(gadm_ids: list[str]) -> JSONResponse:
     features = []
     try:
         for level, areas in areas_by_level.items():
-            gdf = pygadm.Items(admin=areas, content_level=level)
-            features.extend(gdf.to_geo_dict()["features"])
+            features.extend(
+                _get_geometry_features(level, tuple(areas), simplify_tolerance),
+            )
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
@@ -200,6 +215,78 @@ def get_geometries(gadm_ids: list[str]) -> JSONResponse:
         },
         media_type="application/geo+json",
     )
+
+
+@lru_cache(maxsize=16)
+def _get_geometry_features(
+    level: int,
+    areas: tuple[str, ...],
+    simplify_tolerance: float,
+) -> tuple[dict, ...]:
+    shared_ancestor = _shared_gadm_ancestor(areas, level)
+    admins = [shared_ancestor] if shared_ancestor else list(areas)
+    gdf = pygadm.Items(admin=admins, content_level=level)
+    if shared_ancestor:
+        gid_column = f"GID_{level}"
+        indexed_gdf = gdf.set_index(gid_column)
+        missing = [area for area in areas if area not in indexed_gdf.index]
+        if missing:
+            raise ValueError(
+                f"The requested GADM ID(s) were not found: {', '.join(missing)}",
+            )
+        gdf = indexed_gdf.loc[list(areas)].reset_index()
+
+    if simplify_tolerance:
+        gdf.geometry = gdf.geometry.simplify(
+            simplify_tolerance,
+            preserve_topology=True,
+        )
+
+    features = gdf.to_geo_dict()["features"]
+    for feature in features:
+        geometry = feature.get("geometry")
+        if geometry is not None:
+            geometry["coordinates"] = _round_coordinates(geometry["coordinates"])
+    return tuple(features)
+
+
+def _shared_gadm_ancestor(
+    areas: tuple[str, ...],
+    level: int,
+) -> str | None:
+    if level < 3 or len(areas) < 2:
+        return None
+
+    parsed_areas = [area.rsplit("_", 1) for area in areas]
+    if any(len(parts) != 2 for parts in parsed_areas):
+        return None
+
+    versions = {parts[1] for parts in parsed_areas}
+    if len(versions) != 1:
+        return None
+
+    component_lists = [parts[0].split(".") for parts in parsed_areas]
+    common_components = []
+    for components in zip(*component_lists):
+        if len(set(components)) != 1:
+            break
+        common_components.append(components[0])
+
+    common_level = len(common_components) - 1
+    if common_level < 2 or common_level >= level:
+        return None
+    return f"{'.'.join(common_components)}_{versions.pop()}"
+
+
+def _round_coordinates(value):
+    if isinstance(value, (list, tuple)):
+        if value and isinstance(value[0], (int, float)):
+            return [
+                round(coordinate, _GEOJSON_COORDINATE_PRECISION)
+                for coordinate in value
+            ]
+        return [_round_coordinates(item) for item in value]
+    return value
 
 
 @router.post("/names")

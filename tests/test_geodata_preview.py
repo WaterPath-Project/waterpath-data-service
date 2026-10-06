@@ -17,6 +17,7 @@ class _GeometryResult:
     def __init__(self, admin: list[str], level: int) -> None:
         self._admin = admin
         self._level = level
+        self.geometry = _GeometrySeries()
 
     def to_geo_dict(self) -> dict:
         return {
@@ -25,11 +26,27 @@ class _GeometryResult:
                 {
                     "type": "Feature",
                     "properties": {"GID": area, "level": self._level},
-                    "geometry": {"type": "Polygon", "coordinates": []},
+                    "geometry": {
+                        "type": "Point",
+                        "coordinates": [32.123456789, 1.987654321],
+                    },
                 }
                 for area in self._admin
             ],
         }
+
+
+class _GeometrySeries:
+    def __init__(self) -> None:
+        self.simplify_calls = []
+
+    def simplify(
+        self,
+        tolerance: float,
+        preserve_topology: bool,
+    ) -> "_GeometrySeries":
+        self.simplify_calls.append((tolerance, preserve_topology))
+        return self
 
 
 def _write_tif(path: Path, value: float) -> None:
@@ -61,10 +78,14 @@ async def test_get_geometries_returns_geojson_for_gadm_ids(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = []
+    results = []
+    views._get_geometry_features.cache_clear()
 
     def items(admin: list[str], content_level: int) -> _GeometryResult:
         calls.append((admin, content_level))
-        return _GeometryResult(admin, content_level)
+        result = _GeometryResult(admin, content_level)
+        results.append(result)
+        return result
 
     monkeypatch.setattr(views.pygadm, "Items", items)
 
@@ -76,6 +97,10 @@ async def test_get_geometries_returns_geojson_for_gadm_ids(
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/geo+json"
     assert response.json()["type"] == "FeatureCollection"
+    assert response.json()["features"][0]["geometry"]["coordinates"] == [
+        32.12346,
+        1.98765,
+    ]
     assert [feature["properties"]["GID"] for feature in response.json()["features"]] == [
         "UGA.1",
         "UGA.3",
@@ -85,6 +110,75 @@ async def test_get_geometries_returns_geojson_for_gadm_ids(
         (["UGA.1", "UGA.3"], 1),
         (["UGA.1.2"], 2),
     ]
+    assert all(
+        result.geometry.simplify_calls == [(0.005, True)]
+        for result in results
+    )
+
+
+@pytest.mark.anyio
+async def test_get_geometries_can_return_unsimplified_geometry_and_caches_results(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+    results = []
+    views._get_geometry_features.cache_clear()
+
+    def items(admin: list[str], content_level: int) -> _GeometryResult:
+        calls.append((admin, content_level))
+        result = _GeometryResult(admin, content_level)
+        results.append(result)
+        return result
+
+    monkeypatch.setattr(views.pygadm, "Items", items)
+
+    for _ in range(2):
+        response = await client.post(
+            "/api/geodata/get-geometries",
+            params={"simplify_tolerance": 0},
+            json=["UGA.1"],
+        )
+        assert response.status_code == 200
+
+    assert calls == [(["UGA.1"], 1)]
+    assert results[0].geometry.simplify_calls == []
+
+
+@pytest.mark.anyio
+async def test_get_geometries_fetches_shared_parent_once(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gadm_ids = [
+        "UGA.1.1.1.1_1",
+        "UGA.1.1.1.2_1",
+        "UGA.1.1.2.1_1",
+    ]
+    calls = []
+    views._get_geometry_features.cache_clear()
+
+    def items(admin: list[str], content_level: int) -> gpd.GeoDataFrame:
+        calls.append((admin, content_level))
+        return gpd.GeoDataFrame(
+            {"GID_4": list(reversed(gadm_ids))},
+            geometry=[Point(32.0, 1.0), Point(32.1, 1.1), Point(32.2, 1.2)],
+            crs="EPSG:4326",
+        )
+
+    monkeypatch.setattr(views.pygadm, "Items", items)
+
+    response = await client.post(
+        "/api/geodata/get-geometries",
+        json=gadm_ids,
+    )
+
+    assert response.status_code == 200
+    assert calls == [(["UGA.1.1_1"], 4)]
+    assert [
+        feature["properties"]["GID_4"]
+        for feature in response.json()["features"]
+    ] == gadm_ids
 
 
 @pytest.mark.anyio
