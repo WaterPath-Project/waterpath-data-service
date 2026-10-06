@@ -138,7 +138,7 @@ def prepare_spatial_inputs(
         Directory where output files are written.
     res:
         Target raster resolution in decimal degrees.  When ``None`` (default)
-        the resolution is auto-selected by targeting ~100 pixels across the
+        the resolution is auto-selected by targeting ~250 pixels across the
         bounding-box diagonal, floored at the source TIF's native pixel size
         (so grids finer than the source are never generated), clamped to 0.5°,
         and snapped to the nearest standard value.  Pass an explicit value to
@@ -232,7 +232,7 @@ def prepare_spatial_inputs(
     xmin_data, ymin_data, xmax_data, ymax_data = features.total_bounds.tolist()
 
     # Auto-select resolution when not supplied.
-    # Strategy: target ~100 pixels across the bounding-box diagonal so both
+    # Strategy: target ~250 pixels across the bounding-box diagonal so both
     # small (city) and large (country) study areas get a sensible default.
     # The raw target is floored at the source TIF's native pixel size to
     # prevent generating a grid finer than the source data (which would invent
@@ -243,9 +243,7 @@ def prepare_spatial_inputs(
         extent_y = ymax_data - ymin_data
         diagonal = math.hypot(extent_x, extent_y)
         src_native_res = _native_tif_resolution(pop_raster_path, area_gids)
-        target = diagonal / 100.0
-        raw = max(src_native_res, min(0.5, target))
-        res = _round_to_nice_res(raw)
+        res = _auto_population_resolution(extent_x, extent_y, src_native_res)
         logger.info(
             "Auto-selected resolution: %.5f° "
             "(diagonal %.4f°, source native %.5f°, extent %.4f° × %.4f°)",
@@ -362,6 +360,17 @@ def prepare_spatial_inputs(
 #: Standard output resolutions in decimal degrees.  Auto-selection snaps to
 #: the nearest entry so output grids align on clean boundaries.
 _NICE_RESOLUTIONS = [0.001, 0.002, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5]
+
+
+def _auto_population_resolution(
+    extent_x: float,
+    extent_y: float,
+    source_native_resolution: float,
+) -> float:
+    """Select a population grid with roughly 250 cells across its diagonal."""
+    target = math.hypot(extent_x, extent_y) / 250.0
+    raw = max(source_native_resolution, min(0.5, target))
+    return _round_to_nice_res(raw)
 
 
 def _native_tif_resolution(

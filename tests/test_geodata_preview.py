@@ -13,6 +13,25 @@ from shapely.geometry import Point
 from waterpath_data_service.web.api.geodata import views
 
 
+class _GeometryResult:
+    def __init__(self, admin: list[str], level: int) -> None:
+        self._admin = admin
+        self._level = level
+
+    def to_geo_dict(self) -> dict:
+        return {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "properties": {"GID": area, "level": self._level},
+                    "geometry": {"type": "Polygon", "coordinates": []},
+                }
+                for area in self._admin
+            ],
+        }
+
+
 def _write_tif(path: Path, value: float) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with rasterio.open(
@@ -34,6 +53,68 @@ def _read_response_raster(content: bytes) -> np.ndarray:
     with MemoryFile(content) as memory_file:
         with memory_file.open() as source:
             return source.read(1)
+
+
+@pytest.mark.anyio
+async def test_get_geometries_returns_geojson_for_gadm_ids(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+
+    def items(admin: list[str], content_level: int) -> _GeometryResult:
+        calls.append((admin, content_level))
+        return _GeometryResult(admin, content_level)
+
+    monkeypatch.setattr(views.pygadm, "Items", items)
+
+    response = await client.post(
+        "/api/geodata/get-geometries",
+        json=[" UGA.1 ", "UGA.1.2", "UGA.3"],
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/geo+json"
+    assert response.json()["type"] == "FeatureCollection"
+    assert [feature["properties"]["GID"] for feature in response.json()["features"]] == [
+        "UGA.1",
+        "UGA.3",
+        "UGA.1.2",
+    ]
+    assert calls == [
+        (["UGA.1", "UGA.3"], 1),
+        (["UGA.1.2"], 2),
+    ]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("gadm_ids", [[], [""], ["   "]])
+async def test_get_geometries_rejects_empty_gadm_ids(
+    client: AsyncClient,
+    gadm_ids: list[str],
+) -> None:
+    response = await client.post("/api/geodata/get-geometries", json=gadm_ids)
+
+    assert response.status_code == 422
+
+
+@pytest.mark.anyio
+async def test_get_geometries_reports_invalid_gadm_id(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def invalid_items(admin: list[str], content_level: int) -> None:
+        raise ValueError(f"Unknown GADM ID: {admin[0]}")
+
+    monkeypatch.setattr(views.pygadm, "Items", invalid_items)
+
+    response = await client.post(
+        "/api/geodata/get-geometries",
+        json=["INVALID.1"],
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Unknown GADM ID: INVALID.1"
 
 
 @pytest.mark.anyio

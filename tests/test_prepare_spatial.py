@@ -5,7 +5,25 @@ import pytest
 import rasterio
 from affine import Affine
 
-from waterpath_data_service.services.prepare_spatial import _resample_pop_raster
+from waterpath_data_service.services.prepare_spatial import (
+    _auto_population_resolution,
+    _resample_pop_raster,
+)
+
+
+def test_population_resolution_preserves_regional_spatial_detail() -> None:
+    resolution = _auto_population_resolution(
+        extent_x=13.75,
+        extent_y=17.5,
+        source_native_resolution=1 / 120,
+    )
+
+    assert resolution == 0.1
+
+
+def test_population_resolution_retains_native_floor_and_global_cap() -> None:
+    assert _auto_population_resolution(0.2, 0.2, 1 / 120) == 0.01
+    assert _auto_population_resolution(360, 144, 1 / 120) == 0.5
 
 
 def test_population_resampling_does_not_inflate_partial_nodata_cells(

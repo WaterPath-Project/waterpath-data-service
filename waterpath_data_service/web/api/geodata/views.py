@@ -172,6 +172,36 @@ async def polygons(admin: str, level: int) -> JSONResponse:
     geometries = gdf.to_geo_dict()
     return JSONResponse(content=geometries)
 
+
+@router.post("/get-geometries")
+def get_geometries(gadm_ids: list[str]) -> JSONResponse:
+    if not gadm_ids:
+        raise HTTPException(status_code=422, detail="At least one GADM ID is required.")
+
+    areas_by_level: dict[int, list[str]] = {}
+    for gadm_id in gadm_ids:
+        area = gadm_id.strip()
+        if not area:
+            raise HTTPException(status_code=422, detail="GADM IDs cannot be empty.")
+        areas_by_level.setdefault(area.count("."), []).append(area)
+
+    features = []
+    try:
+        for level, areas in areas_by_level.items():
+            gdf = pygadm.Items(admin=areas, content_level=level)
+            features.extend(gdf.to_geo_dict()["features"])
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+    return JSONResponse(
+        content={
+            "type": "FeatureCollection",
+            "features": features,
+        },
+        media_type="application/geo+json",
+    )
+
+
 @router.post("/names")
 def geonames(admin: str) -> JSONResponse:
 

@@ -25,22 +25,22 @@ chosen automatically in three steps.
 
 ### Step 1 — Diagonal-based target
 
-A target pixel size is derived so that ~100 pixels span the bounding-box
+A target pixel size is derived so that ~250 pixels span the bounding-box
 diagonal of the study area:
 
 ```
 diagonal = sqrt(extent_lon² + extent_lat²)   [decimal degrees]
-target   = diagonal / 100
+target   = diagonal / 250
 ```
 
 This keeps output rasters at a manageable size regardless of study-area scale:
 
 | Study area example         | Typical diagonal | `target` |
 |----------------------------|-----------------|---------|
-| City district (Dhaka)      | ~0.4°           | ~0.004° |
-| Sub-national region        | ~3°             | ~0.03°  |
-| Single country (Uganda)    | ~10°            | ~0.1°   |
-| Large country (Brazil)     | ~42°            | ~0.42°  |
+| City district (Dhaka)      | ~0.4°           | ~0.002° |
+| Sub-national region        | ~3°             | ~0.012° |
+| Single country (Uganda)    | ~10°            | ~0.04°  |
+| Large country (Brazil)     | ~42°            | ~0.17°  |
 | Global                     | ~402°           | clamped |
 
 ### Step 2 — Floor at source TIF native resolution
@@ -76,10 +76,10 @@ sub-pixel misalignment when multiple rasters are overlaid or exported.
 
 | Study area               | Source TIF   | `target` | `raw`   | Final (snapped) |
 |--------------------------|-------------|---------|--------|----------------|
-| City (Dhaka, ~0.4° diag) | 1 km/0.00833° | 0.004° | **0.00833°** (floored) | **0.01°** ≈ 1 km |
-| District (~3° diag)      | 1 km/0.00833° | 0.030° | 0.030° | **0.025°** ≈ 2.8 km |
-| Country (~10° diag)      | 1 km/0.00833° | 0.100° | 0.100° | **0.1°** ≈ 11 km |
-| Large country (~40° diag)| 1 km/0.00833° | 0.400° | 0.400° | **0.25°** ≈ 28 km |
+| City (Dhaka, ~0.4° diag) | 1 km/0.00833° | 0.002° | **0.00833°** (floored) | **0.01°** ≈ 1 km |
+| District (~3° diag)      | 1 km/0.00833° | 0.012° | 0.012° | **0.01°** ≈ 1.1 km |
+| Country (~10° diag)      | 1 km/0.00833° | 0.040° | 0.040° | **0.05°** ≈ 5.5 km |
+| Large country (~40° diag)| 1 km/0.00833° | 0.160° | 0.160° | **0.1°** ≈ 11 km |
 | Global                   | 1 km/0.00833° | >0.5°  | 0.500° (clamped) | **0.5°** ≈ 55 km |
 
 To override auto-selection for a specific run, pass an explicit `res` value
