@@ -245,11 +245,11 @@ def _input_download_cache_path(session_id: str) -> Path:
 def _input_download_cache_is_fresh(session_dir: Path, cache_path: Path) -> bool:
     if not cache_path.is_file():
         return False
-    summary_paths = [session_dir / "summary.json"]
-    scenarios_dir = session_dir / "scenarios"
-    if scenarios_dir.is_dir():
-        summary_paths.extend(scenarios_dir.glob("*/summary.json"))
-    source_mtimes = [path.stat().st_mtime_ns for path in summary_paths if path.is_file()]
+    source_mtimes = [
+        path.stat().st_mtime_ns
+        for path in session_dir.rglob("*")
+        if path.is_file()
+    ]
     return bool(source_mtimes) and cache_path.stat().st_mtime_ns >= max(source_mtimes)
 
 

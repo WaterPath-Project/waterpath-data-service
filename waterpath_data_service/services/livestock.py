@@ -1515,10 +1515,9 @@ def generate_livestock_projection_rasters(
     animal_isoraster_src = baseline_livestock_dir / "animal_isoraster.tif"
     if animal_isoraster_src.is_file():
         animal_isoraster_dst = output_dir / animal_isoraster_src.name
-        if not animal_isoraster_dst.exists():
-            animal_regions = _reproject_region_to_zone_grid(animal_isoraster_src, zone_profile)
-            animal_regions[~valid_mask] = np.nan
-            _write_float_raster(animal_regions, zone_profile, animal_isoraster_dst)
+        animal_regions = _reproject_region_to_zone_grid(animal_isoraster_src, zone_profile)
+        animal_regions[~valid_mask] = np.nan
+        _write_float_raster(animal_regions, zone_profile, animal_isoraster_dst)
     for _isodata_csv in (baseline_livestock_dir / "animals").glob("isodata_*.csv"):
         _isodata_dst = out_animals_dir / _isodata_csv.name
         if not _isodata_dst.exists():

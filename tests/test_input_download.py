@@ -1,4 +1,5 @@
 import io
+import os
 import zipfile
 from pathlib import Path
 
@@ -11,6 +12,20 @@ from waterpath_data_service.web.api.data import views
 def _write_csv(path: Path, content: str = "iso,value\n1,0.5\n") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+
+
+def test_download_cache_is_invalidated_by_newer_raster(tmp_path: Path) -> None:
+    session_dir = tmp_path / "case"
+    raster_path = session_dir / "baseline" / "human_emissions" / "isoraster.tif"
+    cache_path = tmp_path / ".download_cache" / "case.zip"
+    raster_path.parent.mkdir(parents=True)
+    cache_path.parent.mkdir(parents=True)
+    raster_path.touch()
+    cache_path.touch()
+    os.utime(raster_path, ns=(2_000_000_000, 2_000_000_000))
+    os.utime(cache_path, ns=(1_000_000_000, 1_000_000_000))
+
+    assert not views._input_download_cache_is_fresh(session_dir, cache_path)
 
 
 @pytest.mark.anyio
