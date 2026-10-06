@@ -1078,7 +1078,17 @@ async def download_projection(
         ),
         examples=["GFDL-ESM4"],
     ),
-    file: UploadFile = File(..., description="Baseline CSV (must contain gid/alpha3 + population columns)"),
+    file: UploadFile = File(
+        ...,
+        description="Baseline CSV (must contain gid/alpha3 + population columns).",
+    ),
+    isoraster: UploadFile = File(
+        ...,
+        description=(
+            "Baseline human_emissions/isoraster.tif spatial template. "
+            "The generated scenario preserves this exact grid."
+        ),
+    ),
 ):
     """Generate a projected scenario from an uploaded baseline CSV.
 
@@ -1112,12 +1122,16 @@ async def download_projection(
 
     static_data_dir = _STATIC_DIR / "data"
 
-    # Read the uploaded CSV.
+    # Read the baseline CSV and the authoritative baseline spatial template.
     raw = await file.read()
     try:
         baseline_df = pd.read_csv(io.StringIO(raw.decode("utf-8")))
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Could not parse uploaded CSV: {exc}")
+
+    reference_isoraster_bytes = await isoraster.read()
+    if not reference_isoraster_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded isoraster is empty.")
 
     gid_col = next((c for c in ["gid", "alpha3", "iso_country"] if c in baseline_df.columns), None)
     if gid_col is None:
@@ -1129,6 +1143,8 @@ async def download_projection(
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_path = Path(tmp_dir)
+        reference_isoraster_path = tmp_path / "baseline_isoraster.tif"
+        reference_isoraster_path.write_bytes(reference_isoraster_bytes)
 
         # isoraster_path is only produced when population is generated; initialise
         # to None so the hydrology block can reference it unconditionally.
@@ -1181,6 +1197,7 @@ async def download_projection(
                     isodata_path=str(baseline_csv_path),
                     pop_raster_path=str(tif_path),
                     out_dir=str(spatial_output_dir),
+                    template_raster_path=str(reference_isoraster_path),
                 )
             except Exception as exc:
                 raise HTTPException(status_code=500, detail=f"prepare_spatial_inputs failed: {exc}")

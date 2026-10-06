@@ -114,6 +114,7 @@ def prepare_spatial_inputs(
     pop_raster_path: str,
     out_dir: str,
     res: float | None = None,
+    template_raster_path: str | None = None,
 ) -> Dict[str, str]:
     """Generate ``isoraster.tif``, ``pop_urban.tif`` and ``pop_rural.tif``.
 
@@ -147,6 +148,10 @@ def prepare_spatial_inputs(
           - 0.5°  → ~55 km at equator  (national / global)
           - 0.1°  → ~11 km             (regional)
           - 0.01° → ~1 km              (city / district)
+    template_raster_path:
+        Optional existing isoraster whose exact grid (CRS, transform, extent,
+        width, and height) must be preserved. This takes precedence over
+        automatic resolution selection.
 
     Returns
     -------
@@ -231,35 +236,48 @@ def prepare_spatial_inputs(
     all_bounds = [geom.bounds for geom in features.geometry]
     xmin_data, ymin_data, xmax_data, ymax_data = features.total_bounds.tolist()
 
-    # Auto-select resolution when not supplied.
-    # Strategy: target ~250 pixels across the bounding-box diagonal so both
-    # small (city) and large (country) study areas get a sensible default.
-    # The raw target is floored at the source TIF's native pixel size to
-    # prevent generating a grid finer than the source data (which would invent
-    # spatial detail that does not exist), clamped to 0.5°, then snapped to
-    # the nearest standard "nice" value for clean grid alignment.
-    if res is None:
-        extent_x = xmax_data - xmin_data
-        extent_y = ymax_data - ymin_data
-        diagonal = math.hypot(extent_x, extent_y)
-        src_native_res = _native_tif_resolution(pop_raster_path, area_gids)
-        res = _auto_population_resolution(extent_x, extent_y, src_native_res)
-        logger.info(
-            "Auto-selected resolution: %.5f° "
-            "(diagonal %.4f°, source native %.5f°, extent %.4f° × %.4f°)",
-            res, diagonal, src_native_res, extent_x, extent_y,
-        )
+    if template_raster_path is not None:
+        if res is not None:
+            raise ValueError("res and template_raster_path cannot be provided together.")
+        with rasterio.open(template_raster_path) as template:
+            if template.crs is None or template.crs.to_epsg() != 4326:
+                raise ValueError("Population template raster must use EPSG:4326.")
+            width = template.width
+            height = template.height
+            transform = template.transform
+            crs_out = template.crs
+            xmin, ymin, xmax, ymax = template.bounds
+            res = abs(transform.a)
+    else:
+        # Auto-select resolution when not supplied.
+        # Strategy: target ~250 pixels across the bounding-box diagonal so both
+        # small (city) and large (country) study areas get a sensible default.
+        # The raw target is floored at the source TIF's native pixel size to
+        # prevent generating a grid finer than the source data (which would invent
+        # spatial detail that does not exist), clamped to 0.5°, then snapped to
+        # the nearest standard "nice" value for clean grid alignment.
+        if res is None:
+            extent_x = xmax_data - xmin_data
+            extent_y = ymax_data - ymin_data
+            diagonal = math.hypot(extent_x, extent_y)
+            src_native_res = _native_tif_resolution(pop_raster_path, area_gids)
+            res = _auto_population_resolution(extent_x, extent_y, src_native_res)
+            logger.info(
+                "Auto-selected resolution: %.5f° "
+                "(diagonal %.4f°, source native %.5f°, extent %.4f° × %.4f°)",
+                res, diagonal, src_native_res, extent_x, extent_y,
+            )
 
-    # Pad by one cell on every side (mirrors R's ``padding = 1``)
-    xmin = max(math.floor(xmin_data / res) * res - res, -180.0)
-    ymin = max(math.floor(ymin_data / res) * res - res,  -90.0)
-    xmax = min(math.ceil(xmax_data  / res) * res + res,  180.0)
-    ymax = min(math.ceil(ymax_data  / res) * res + res,   90.0)
+        # Pad by one cell on every side (mirrors R's ``padding = 1``)
+        xmin = max(math.floor(xmin_data / res) * res - res, -180.0)
+        ymin = max(math.floor(ymin_data / res) * res - res,  -90.0)
+        xmax = min(math.ceil(xmax_data  / res) * res + res,  180.0)
+        ymax = min(math.ceil(ymax_data  / res) * res + res,   90.0)
 
-    width  = round((xmax - xmin) / res)
-    height = round((ymax - ymin) / res)
-    transform = from_bounds(xmin, ymin, xmax, ymax, width, height)
-    crs_out = "EPSG:4326"
+        width  = round((xmax - xmin) / res)
+        height = round((ymax - ymin) / res)
+        transform = from_bounds(xmin, ymin, xmax, ymax, width, height)
+        crs_out = "EPSG:4326"
 
     logger.info(
         "Target grid: %d × %d px at %.4f° | extent (%.4f, %.4f, %.4f, %.4f)",

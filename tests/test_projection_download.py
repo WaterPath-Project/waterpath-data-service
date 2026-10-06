@@ -30,6 +30,8 @@ async def test_livestock_only_download_uses_private_population_grid(
     def fake_prepare_spatial_inputs(**kwargs: str) -> dict[str, str]:
         output_dir = Path(kwargs["out_dir"])
         output_dir.mkdir()
+        template_path = Path(kwargs["template_raster_path"])
+        assert template_path.read_bytes() == b"baseline-grid"
         isoraster = output_dir / "isoraster.tif"
         isoraster.touch()
         return {
@@ -81,7 +83,8 @@ async def test_livestock_only_download_uses_private_population_grid(
                 "baseline.csv",
                 "gid,population,fraction_urban_pop\nUGA,100,0.2\n",
                 "text/csv",
-            )
+            ),
+            "isoraster": ("isoraster.tif", b"baseline-grid", "image/tiff"),
         },
     )
 
