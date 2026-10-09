@@ -123,6 +123,15 @@ refining. Routing codes, cycles, downstream accumulation, and consistency of the
 hydrology grid are checked without changing the native hydrology inputs.
 Geometry compatibility alone is not scientific validation of a model run.
 
+With generated (default) hydrology, every emission cell must be fully covered by
+hydrology cells that have flow direction and accumulation data. Preparation removes
+emission cells that fall outside the hydrology extent or in unrouted hydrology cells
+(for example sea along a coastline) from `isoraster.tif` and `animal_isoraster.tif`,
+and moves their population and livestock counts to the remaining cells of the same
+zone, so zone totals are unchanged. If a whole zone lies in such cells, preparation
+fails with an error instead of producing inputs that cannot be routed. Custom
+uploaded hydrology is not modified or checked this way.
+
 To substitute complete custom hydrology, use the existing upload endpoint:
 
 ```bash

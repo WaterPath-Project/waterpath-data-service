@@ -1,5 +1,7 @@
 """Prepare model inputs against an immutable emissions isoraster."""
 
+from __future__ import annotations
+
 from pathlib import Path
 import json
 import tempfile
@@ -45,6 +47,170 @@ def _validate_routing(paths: dict[Path, Path], data_dir: Path) -> None:
             raise ValueError("Flow accumulation must increase downstream along the supplied routing network.")
 
 
+_POPULATION_RASTERS = ("pop_urban.tif", "pop_rural.tif", "popurban.tif", "poprural.tif")
+
+
+def _routed_hydrology(data_dir: Path):
+    """Return ``(routed, transform, crs)`` for generated hydrology routing, or ``None``.
+
+    Custom uploaded hydrology is left to the uploader (see README), so only
+    hydrology produced by this service is checked.
+    """
+    routing = data_dir / "hydrology/routing"
+    direction = routing / "flowdir.tif"
+    if not direction.is_file():
+        return None
+    provenance = data_dir / "hydrology/source.json"
+    if provenance.is_file():
+        try:
+            source_name = str(json.loads(provenance.read_text(encoding="utf-8")).get("source", ""))
+        except ValueError:
+            source_name = ""
+        if source_name.startswith("custom"):
+            return None
+    with rasterio.open(direction) as source:
+        routed = np.isfinite(source.read(1, masked=True).astype("float64").filled(np.nan))
+        transform, crs, shape = source.transform, source.crs, source.shape
+    accumulation = routing / "flowacc.tif"
+    if accumulation.is_file():
+        with rasterio.open(accumulation) as source:
+            if source.shape == shape and source.transform == transform:
+                routed &= np.isfinite(source.read(1, masked=True).astype("float64").filled(np.nan))
+    return routed, transform, crs
+
+
+def _unrouted_mask(transform, height: int, width: int, crs, hydrology) -> np.ndarray | None:
+    """Mark emission cells not fully covered by routed hydrology cells.
+
+    Hydrology coupling distributes each emission cell over the hydrology cells
+    it overlaps, so a cell is only safe when every overlapped hydrology cell
+    lies inside the hydrology extent and has flow direction/accumulation data.
+    """
+    routed, routing_transform, routing_crs = hydrology
+    if crs != routing_crs or transform.b or transform.d or routing_transform.b or routing_transform.d:
+        return None
+    eps = 1e-6
+
+    def axis_ranges(edges, origin, size, cells):
+        position = (edges - origin) / size
+        lower = np.minimum(position[:-1], position[1:])
+        upper = np.maximum(position[:-1], position[1:])
+        first = np.floor(lower + eps).astype(int)
+        last = np.ceil(upper - eps).astype(int) - 1
+        inside = (first >= 0) & (last < cells) & (last >= first)
+        return np.clip(first, 0, cells - 1), np.clip(last, 0, cells - 1), inside
+
+    x_edges = transform.c + transform.a * np.arange(width + 1)
+    y_edges = transform.f + transform.e * np.arange(height + 1)
+    col_first, col_last, col_inside = axis_ranges(
+        x_edges, routing_transform.c, routing_transform.a, routed.shape[1])
+    row_first, row_last, row_inside = axis_ranges(
+        y_edges, routing_transform.f, routing_transform.e, routed.shape[0])
+    missing = np.pad((~routed).astype(np.int64), ((1, 0), (1, 0))).cumsum(0).cumsum(1)
+    r0, r1 = row_first[:, None], row_last[:, None] + 1
+    c0, c1 = col_first[None, :], col_last[None, :] + 1
+    unrouted_overlaps = missing[r1, c1] - missing[r0, c1] - missing[r1, c0] + missing[r0, c0]
+    covered = row_inside[:, None] & col_inside[None, :] & (unrouted_overlaps == 0)
+    return ~covered
+
+
+def _zone_domain(values: np.ndarray, nodata) -> np.ndarray:
+    domain = np.isfinite(values) & (values != 0)
+    if nodata is not None and np.isfinite(nodata):
+        domain &= values != nodata
+    return domain
+
+
+def _zone_rasters(data_dir: Path, template: Path) -> list[tuple[Path, list[Path]]]:
+    """Pair each zone raster with the count rasters whose totals it defines."""
+    human = [template.parent / name for name in _POPULATION_RASTERS if (template.parent / name).is_file()]
+    heads = sorted((data_dir / "livestock_emissions/animals").glob("*_heads.tif"))
+    animal = data_dir / "livestock_emissions/animal_isoraster.tif"
+    if animal.is_file():
+        return [(template, human), (animal, heads)]
+    return [(template, human + heads)]
+
+
+def _unrouted_emission_cells(data_dir: Path, template: Path) -> dict[Path, np.ndarray]:
+    hydrology = _routed_hydrology(data_dir)
+    if hydrology is None:
+        return {}
+    cells = {}
+    for zone_path, _ in _zone_rasters(data_dir, template):
+        with rasterio.open(zone_path) as source:
+            unrouted = _unrouted_mask(source.transform, source.height, source.width, source.crs, hydrology)
+            if unrouted is None:
+                continue
+            values = source.read(1).astype("float64")
+            cells[zone_path] = _zone_domain(values, source.nodata) & unrouted
+    return cells
+
+
+def _exclude_unrouted_cells(data_dir: Path, template: Path) -> None:
+    """Drop emission cells that hydrology cannot route, conserving zone totals.
+
+    Coastal or edge cells whose hydrology cell has no flow direction (e.g. sea
+    in the default 0.5-degree routing network) would otherwise receive
+    emissions that can never reach the river network. Their population and
+    livestock counts are moved to the remaining cells of the same zone.
+    """
+    hydrology = _routed_hydrology(data_dir)
+    if hydrology is None:
+        return
+    updates: dict[Path, tuple[np.ndarray, dict, dict]] = {}
+    stranded: set[int] = set()
+    for zone_path, count_paths in _zone_rasters(data_dir, template):
+        with rasterio.open(zone_path) as source:
+            unrouted = _unrouted_mask(source.transform, source.height, source.width, source.crs, hydrology)
+            if unrouted is None:
+                continue
+            zone_profile, zone_tags = source.profile.copy(), source.tags()
+            zones = source.read(1)
+            grid = grid_signature(source)
+        domain = _zone_domain(zones.astype("float64"), zone_profile.get("nodata"))
+        remove = domain & unrouted
+        if not remove.any():
+            continue
+        zone_ids = np.unique(zones[remove])
+        keep_by_zone = {zone: domain & ~remove & (zones == zone) for zone in zone_ids}
+        stranded.update(int(zone) for zone, keep in keep_by_zone.items() if not keep.any())
+        if stranded:
+            continue
+        for path in count_paths:
+            with rasterio.open(path) as source:
+                if grid_signature(source) != grid:
+                    continue
+                profile, tags = source.profile.copy(), source.tags()
+                counts = source.read(1, masked=True).astype("float64").filled(np.nan)
+            valid = np.isfinite(counts)
+            for zone, keep in keep_by_zone.items():
+                moved = np.nansum(np.where(remove & (zones == zone), counts, 0.0))
+                if moved == 0:
+                    continue
+                base = np.where(keep & valid, np.clip(counts, 0, None), 0.0)
+                weights = base / base.sum() if base.sum() > 0 else keep / keep.sum()
+                counts = np.where(keep, np.where(valid, counts, 0.0) + moved * weights, counts)
+            nodata = profile.get("nodata")
+            counts[remove] = nodata if nodata is not None else 0.0
+            if nodata is not None:
+                counts[~np.isfinite(counts)] = nodata
+            updates[path] = (counts, profile, tags)
+        new_zones = zones.copy()
+        zone_nodata = zone_profile.get("nodata")
+        new_zones[remove] = zone_nodata if zone_nodata is not None else 0
+        updates[zone_path] = (new_zones, zone_profile, zone_tags)
+    if stranded:
+        raise ValueError(
+            "Emission zone(s) " + ", ".join(str(zone) for zone in sorted(stranded))
+            + " lie entirely in hydrology cells without routing (e.g. sea or outside the "
+            "hydrology extent) and cannot be represented with this hydrology."
+        )
+    for path, (values, profile, tags) in updates.items():
+        with rasterio.open(path, "w", **profile) as destination:
+            destination.write(values.astype(profile["dtype"]), 1)
+            destination.update_tags(**tags)
+
+
 def validate_model_grid(data_dir: Path) -> None:
     reference = data_dir / "human_emissions/isoraster.tif"
     if not reference.is_file():
@@ -73,6 +239,13 @@ def validate_model_grid(data_dir: Path) -> None:
         if inconsistent:
             raise ValueError("Hydrology rasters do not share one grid: " + ", ".join(inconsistent))
     _validate_routing({path: path for path in rasters}, data_dir)
+    unrouted = {path: int(cells.sum()) for path, cells in _unrouted_emission_cells(data_dir, reference).items()}
+    unrouted = {path: count for path, count in unrouted.items() if count}
+    if unrouted:
+        raise ValueError(
+            "Emission cells lie in hydrology cells without routing or outside the hydrology extent: "
+            + ", ".join(f"{path.relative_to(data_dir)} ({count} cells)" for path, count in unrouted.items())
+        )
 
 
 def align_model_grid(data_dir: Path) -> None:
@@ -139,6 +312,7 @@ def align_model_grid(data_dir: Path) -> None:
         _validate_routing(prepared, data_dir)
         for staged, path in replacements:
             staged.replace(path)
+    _exclude_unrouted_cells(data_dir, template)
     validate_model_grid(data_dir)
     provenance = data_dir / "hydrology/source.json"
     if provenance.is_file():

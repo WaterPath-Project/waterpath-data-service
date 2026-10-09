@@ -247,6 +247,8 @@ async def install_upload(upload, session: Path, target: Path) -> dict:
         if (package / "hydrology").exists():
             shutil.rmtree(package / "hydrology")
         (staging / "hydrology").rename(package / "hydrology")
+        # Label the hydrology as custom before alignment, which treats generated hydrology differently.
+        (package / "hydrology" / PROVENANCE).write_text(json.dumps(report, indent=2), encoding="utf-8")
         try:
             await run_in_threadpool(align_model_grid, package)
         except ValueError as exc:
