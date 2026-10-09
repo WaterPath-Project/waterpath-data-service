@@ -1,10 +1,13 @@
 import json, logging, os, shutil, httpx, pandas as pd, io
 import zipfile
+import inspect
+import tempfile
+from functools import wraps
 from pathlib import Path
-import rasterio
 from waterpath_data_service.settings import settings
 from waterpath_data_service.services.geodata import geonames, shapefile, resample_raster, geofilter
 from waterpath_data_service.services.prepare_spatial import prepare_spatial_inputs
+from waterpath_data_service.services.model_grid import align_model_grid as _align_model_grid
 from waterpath_data_service.services.projections import (
     generate_baseline_csv_projection,
     generate_population_isoraster,
@@ -23,6 +26,9 @@ from waterpath_data_service.services.temperature import (
     _baseline_temperature_path,
 )
 from waterpath_data_service.services.hydrology import generate_hydrology_inputs, list_available_models
+from waterpath_data_service.services.hydrology_upload import (
+    checked_session, session_lock, install_upload, source_info,
+)
 from waterpath_data_service.services.qmra import generate_qmra_inputs
 from waterpath_data_service.services.summary import summarize_session
 from waterpath_data_service.services.livestock import (
@@ -45,6 +51,24 @@ _DATA_DIR: Path = settings.data_dir
 
 # Static assets (schemas, look-up tables) – always bundled with the container image.
 _STATIC_DIR: Path = Path(__file__).parent.parent.parent.parent / "static"
+
+
+def _session_operation(function):
+    signature = inspect.signature(function)
+
+    @wraps(function)
+    async def asynchronous(*args, **kwargs):
+        session_id = signature.bind(*args, **kwargs).arguments["session_id"]
+        with session_lock(checked_session(_DATA_DIR, session_id)):
+            return await function(*args, **kwargs)
+
+    @wraps(function)
+    def synchronous(*args, **kwargs):
+        session_id = signature.bind(*args, **kwargs).arguments["session_id"]
+        with session_lock(checked_session(_DATA_DIR, session_id)):
+            return function(*args, **kwargs)
+
+    return asynchronous if inspect.iscoroutinefunction(function) else synchronous
 
 
 async def _persist_fine_flow_direction(
@@ -105,46 +129,6 @@ def _load_livestock_tabular_schema_fields() -> dict[str, set[str]]:
         if path.is_file():
             result[key] = read_schema_field_names(path)
     return result
-
-
-def _validate_generated_projection_grids(
-    reference_isoraster: Path,
-    scenario_dir: Path,
-) -> None:
-    with rasterio.open(reference_isoraster) as reference:
-        expected = (
-            reference.width,
-            reference.height,
-            reference.transform,
-            reference.crs,
-        )
-
-    candidates = [
-        scenario_dir / "isoraster.tif",
-        scenario_dir / "pop_urban.tif",
-        scenario_dir / "pop_rural.tif",
-        scenario_dir / "livestock_emissions" / "animal_isoraster.tif",
-        *(scenario_dir / "livestock_emissions" / "animals").glob("*_heads.tif"),
-    ]
-    mismatches: list[str] = []
-    for path in candidates:
-        if not path.is_file():
-            continue
-        with rasterio.open(path) as raster:
-            actual = (
-                raster.width,
-                raster.height,
-                raster.transform,
-                raster.crs,
-            )
-        if actual != expected:
-            mismatches.append(str(path.relative_to(scenario_dir)))
-
-    if mismatches:
-        raise ValueError(
-            "Generated projection rasters do not match the baseline isoraster grid: "
-            + ", ".join(mismatches)
-        )
 
 # Schema expansion: maps alias tokens to their constituent schema list.
 _SCHEMA_EXPANSION: dict[str, list[str]] = {
@@ -222,6 +206,13 @@ def _get_session_default_dir(session_id: str) -> Path:
     return _DATA_DIR / session_id / "baseline"
 
 
+def align_model_grid(data_dir: Path) -> None:
+    try:
+        _align_model_grid(data_dir)
+    except ValueError as exc:
+        raise HTTPException(422, f"Model input preparation failed: {exc}") from exc
+
+
 def ensure_human_emissions_csv(session_id: str) -> Path:
     """Merge population.csv + sanitation.csv into human_emissions/isodata.csv.
 
@@ -286,11 +277,11 @@ def _input_download_cache_path(session_id: str) -> Path:
 def _input_download_cache_is_fresh(session_dir: Path, cache_path: Path) -> bool:
     if not cache_path.is_file():
         return False
-    source_mtimes = [
-        path.stat().st_mtime_ns
-        for path in session_dir.rglob("*")
-        if path.is_file()
-    ]
+    summary_paths = [session_dir / "summary.json"]
+    scenarios_dir = session_dir / "scenarios"
+    if scenarios_dir.is_dir():
+        summary_paths.extend(scenarios_dir.glob("*/summary.json"))
+    source_mtimes = [path.stat().st_mtime_ns for path in summary_paths if path.is_file()]
     return bool(source_mtimes) and cache_path.stat().st_mtime_ns >= max(source_mtimes)
 
 
@@ -398,6 +389,7 @@ def summarize_input_data(session_id: str) -> JSONResponse:
 
 
 @router.get("/input/download")
+@_session_operation
 def download_input_data(
     session_id: str,
     file_id: str | None = None,
@@ -561,25 +553,84 @@ def download_input_data(
 
 
 @router.post("/input/upload")
-async def upload_input_data(session_id: str, file_id: str, file: UploadFile) -> None:
-    session_dir = _DATA_DIR / session_id
-    default_folder = "baseline/"
-    if os.path.isdir(session_dir):
-        print(file_id in schemas)
-        if file_id is not None and file_id in schemas:
-            file_path = file_id + ".csv"
+@_session_operation
+async def upload_input_data(
+    session_id: str,
+    file_id: str,
+    file: UploadFile,
+    ssp: str | None = None,
+    year: int | None = None,
+) -> dict:
+    """Replace baseline or scenario input; hydrology requires a complete 75-raster ZIP."""
+    session_dir = checked_session(_DATA_DIR, session_id)
+    try:
+        if year is not None and year not in {2025, 2030, 2050, 2100}:
+            raise HTTPException(422, "Invalid year. Allowed: 2025, 2030, 2050, 2100.")
+        data_dir, scenario = _input_download_data_dir(session_dir, ssp, year)
+        if not data_dir.is_dir():
+            raise HTTPException(404, "Baseline input directory not found.")
+        if file_id == "hydrology":
+            report = await install_upload(file, session_dir, data_dir)
+            if scenario is None:
+                for target in (session_dir / "scenarios").glob("*"):
+                    if target.is_dir():
+                        generate_hydrology_inputs(
+                            shapefile_path=session_dir / "baseline/geodata/geodata.shp",
+                            static_data_dir=_STATIC_DIR / "data",
+                            out_dir=target,
+                            ssp=target.name.split("_")[0],
+                        )
+                        align_model_grid(target)
+        elif file_id in schemas:
+            if not (file.filename or "").lower().endswith(".csv"):
+                raise HTTPException(415, "This file_id requires a .csv file.")
+            contents = await file.read(16 * 1024 * 1024 + 1)
+            if len(contents) > 16 * 1024 * 1024:
+                raise HTTPException(413, "CSV upload exceeds 16 MiB.")
             try:
-                contents = file.file.read()
-                with open(session_dir / file_path, "wb") as f:
-                    f.write(contents)
-            except HTTPException:
-                raise HTTPException(status_code=500, detail="File was not uploaded.")
-            finally:
-                file.file.close()
+                frame = pd.read_csv(io.BytesIO(contents), dtype=str)
+            except (ValueError, UnicodeError, pd.errors.ParserError) as exc:
+                raise HTTPException(422, "Invalid CSV.") from exc
+            descriptor = json.loads(_input_preview_schema_path(
+                session_dir, file_id, scenario is not None,
+            ).read_text(encoding="utf-8"))
+            fields = {field["name"] for field in descriptor["fields"]}
+            if frame.empty or set(frame.columns) - fields:
+                raise HTTPException(422, "CSV must contain rows and only fields from the selected schema.")
+            if "gid" in fields:
+                if "gid" not in frame or frame["gid"].isna().any() or frame["gid"].duplicated().any():
+                    raise HTTPException(422, "CSV gids must be present and unique.")
+            elif set(frame.columns) != fields:
+                raise HTTPException(422, "Facility CSV must contain all fields from the selected schema.")
+            destination = _input_preview_paths(data_dir, file_id, scenario is not None)[0]
+            if scenario and file_id in {"population", "sanitation"}:
+                if not destination.is_file():
+                    raise HTTPException(404, "Scenario isodata.csv not found.")
+                existing = pd.read_csv(destination, dtype=str).set_index("gid")
+                incoming = frame.set_index("gid")
+                if existing.index.has_duplicates or set(existing.index) != set(incoming.index):
+                    raise HTTPException(422, "CSV gids must match the scenario isodata gids.")
+                for column in incoming.columns:
+                    if column == "iso" and column in existing:
+                        if not existing[column].equals(incoming[column].reindex(existing.index)):
+                            raise HTTPException(422, "Changing scenario iso identifiers is not supported.")
+                    existing[column] = incoming[column].reindex(existing.index)
+                contents = existing.reset_index().to_csv(index=False).encode("utf-8")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(dir=data_dir, prefix=".csv-upload-") as temporary:
+                staged = Path(temporary) / "input.csv"
+                staged.write_bytes(contents)
+                staged.replace(destination)
+            if scenario is None and file_id in {"population", "sanitation"}:
+                (data_dir / "human_emissions/isodata.csv").unlink(missing_ok=True)
+            report = {"source": "custom_uploaded"}
         else:
-            raise HTTPException(status_code=500, detail="Invalid File ID provided.")
-    else:
-        raise HTTPException(status_code=500, detail="Invalid Session ID provided.")
+            raise HTTPException(422, f"Invalid file_id. Allowed: {schemas + ['hydrology']}")
+        _input_download_cache_path(session_id).unlink(missing_ok=True)
+        return {"status": "uploaded", "session_id": session_id, "file_id": file_id,
+                "scenario": scenario or "baseline", **report}
+    finally:
+        await file.close()
 
 
 @router.get("/projections/climate-models")
@@ -604,6 +655,7 @@ async def list_projection_models(
 
 
 @router.post("/projections/generate")
+@_session_operation
 async def generate_projection_data(
     session_id: str,
     schema: str = Query(
@@ -634,7 +686,7 @@ async def generate_projection_data(
     hydrology_downscaling: bool = Query(
         False,
         description=(
-            "Enable experimental hydrology downscaling. Without a fine flow-direction TIFF, "
+            "HIGHLY EXPERIMENTAL: not validated for production modelling. Without a fine flow-direction TIFF, "
             "only runoff and continuous fields are smoothed; discharge/routing remain coarse-derived."
         ),
     ),
@@ -707,14 +759,21 @@ async def generate_projection_data(
         climate_model,
     )
 
-    hydrology_baseline_dir = session_dir / "baseline" / "hydrology"
-    if not hydrology_baseline_dir.is_dir():
-        schemas_to_generate = [schema_name for schema_name in schemas_to_generate if schema_name != "hydrology"]
-
     # Output folder sits alongside `baseline/` under a `scenarios/` container:
     # data/<session_id>/scenarios/<SSP>_<year>/human_emissions.csv
     scenario_folder_name = f"{ssp_norm}_{year}"
     scenario_dir = session_dir / "scenarios" / scenario_folder_name
+    hydrology_baseline_dir = session_dir / "baseline" / "hydrology"
+    custom_hydrology = any(
+        source_info(folder).get("source") in {"custom_uploaded", "custom_baseline_reused"}
+        for folder in (scenario_dir / "hydrology", hydrology_baseline_dir)
+    )
+    if custom_hydrology and (hydrology_flow_direction_tif is not None or (
+        "hydrology" in schemas_to_generate and (climate_model or hydrology_downscaling)
+    )):
+        raise HTTPException(409, "Custom hydrology cannot be combined with climate_model or experimental raster controls.")
+    if not hydrology_baseline_dir.is_dir() and not custom_hydrology:
+        schemas_to_generate = [schema_name for schema_name in schemas_to_generate if schema_name != "hydrology"]
     scenario_dir.mkdir(parents=True, exist_ok=True)
     fine_flow_direction_path = await _persist_fine_flow_direction(
         hydrology_flow_direction_tif,
@@ -927,6 +986,8 @@ async def generate_projection_data(
                     hydrology_downscaling=hydrology_downscaling,
                     fine_flow_direction_path=fine_flow_direction_path,
                 )
+            except HTTPException:
+                raise
             except Exception as exc:
                 logger.exception(
                     "Hydrology projection failed: session_id=%s gids=%s ssp=%s year=%s climate_model=%s",
@@ -942,6 +1003,7 @@ async def generate_projection_data(
                 "model": hydro_result["model"],
                 "variables": list(hydro_result["variables"]),
                 "downscaling": hydro_result["downscaling"],
+                "source": hydro_result.get("source"),
                 "assumptions_csv": hydro_result.get("assumptions_csv"),
             })
 
@@ -981,6 +1043,12 @@ async def generate_projection_data(
                         "QMRA projection generation failed for session %s (%s %s): %s",
                         session_id, ssp_norm, year, _qmra_exc,
                     )
+
+    align_model_grid(scenario_dir)
+    _input_download_cache_path(session_id).unlink(missing_ok=True)
+    for result in schema_results:
+        if result["schema"] == "hydrology":
+            result["source"] = source_info(scenario_dir / "hydrology")
 
     # Write summary.json to the scenario directory.
     summary_data = {
@@ -1119,17 +1187,7 @@ async def download_projection(
         ),
         examples=["GFDL-ESM4"],
     ),
-    file: UploadFile = File(
-        ...,
-        description="Baseline CSV (must contain gid/alpha3 + population columns).",
-    ),
-    isoraster: UploadFile = File(
-        ...,
-        description=(
-            "Baseline human_emissions/isoraster.tif spatial template. "
-            "The generated scenario preserves this exact grid."
-        ),
-    ),
+    file: UploadFile = File(..., description="Baseline CSV (must contain gid/alpha3 + population columns)"),
 ):
     """Generate a projected scenario from an uploaded baseline CSV.
 
@@ -1163,16 +1221,12 @@ async def download_projection(
 
     static_data_dir = _STATIC_DIR / "data"
 
-    # Read the baseline CSV and the authoritative baseline spatial template.
+    # Read the uploaded CSV.
     raw = await file.read()
     try:
         baseline_df = pd.read_csv(io.StringIO(raw.decode("utf-8")))
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Could not parse uploaded CSV: {exc}")
-
-    reference_isoraster_bytes = await isoraster.read()
-    if not reference_isoraster_bytes:
-        raise HTTPException(status_code=400, detail="Uploaded isoraster is empty.")
 
     gid_col = next((c for c in ["gid", "alpha3", "iso_country"] if c in baseline_df.columns), None)
     if gid_col is None:
@@ -1184,8 +1238,6 @@ async def download_projection(
 
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_path = Path(tmp_dir)
-        reference_isoraster_path = tmp_path / "baseline_isoraster.tif"
-        reference_isoraster_path.write_bytes(reference_isoraster_bytes)
 
         # isoraster_path is only produced when population is generated; initialise
         # to None so the hydrology block can reference it unconditionally.
@@ -1214,11 +1266,7 @@ async def download_projection(
         is_country_level = all(len(str(g)) <= 3 for g in gids_list)
         alpha3_list = [str(g)[:3] for g in gids_list]
 
-        _livestock_schema = next(
-            (s for s in schemas_to_generate if s.startswith("livestock_")), None
-        )
-        _needs_spatial_grid = "population" in schemas_to_generate or _livestock_schema is not None
-        if _needs_spatial_grid:
+        if "population" in schemas_to_generate:
             from waterpath_data_service.services.projections import (
                 _population_tif_path,
             )
@@ -1227,25 +1275,18 @@ async def download_projection(
             except FileNotFoundError as exc:
                 raise HTTPException(status_code=500, detail=str(exc))
 
-            spatial_output_dir = (
-                scenario_dir
-                if "population" in schemas_to_generate
-                else tmp_path / "projection_grid"
-            )
             try:
                 paths = prepare_spatial_inputs(
                     geodata_path=str(shp_path),
                     isodata_path=str(baseline_csv_path),
                     pop_raster_path=str(tif_path),
-                    out_dir=str(spatial_output_dir),
-                    template_raster_path=str(reference_isoraster_path),
+                    out_dir=str(scenario_dir),
                 )
             except Exception as exc:
                 raise HTTPException(status_code=500, detail=f"prepare_spatial_inputs failed: {exc}")
 
             isoraster_path = Path(paths["isoraster"])
 
-        if "population" in schemas_to_generate:
             try:
                 update_human_emissions_population(
                     human_emissions_path=projected_csv_path,
@@ -1299,6 +1340,9 @@ async def download_projection(
             treat_assumptions = await fetch_assumptions(["treatment_fractions"])
             all_assumptions.extend(treat_assumptions)
 
+        _livestock_schema = next(
+            (s for s in schemas_to_generate if s.startswith("livestock_")), None
+        )
         if _livestock_schema is not None:
             _ls_sub_params = _LIVESTOCK_SUB_SCHEMA_PARAMS.get(_livestock_schema, {})
             try:
@@ -1324,11 +1368,14 @@ async def download_projection(
                 generate_livestock_tabular_inputs(tmp_path, static_data_dir)
 
                 livestock_future_df_dl = await fetch_livestock_future_csv(alpha3_list, ssp_norm, year)
+                _scenario_isoraster = scenario_dir / "isoraster.tif"
                 _ls_zone_idx, _ls_valid_mask, _ls_zone_profile = _build_livestock_zone_template(
                     tmp_path,
                     static_data_dir,
                     _ls_mapping,
-                    reference_isoraster_path=isoraster_path,
+                    reference_isoraster_path=(
+                        _scenario_isoraster if _scenario_isoraster.is_file() else None
+                    ),
                 )
                 ls_result = generate_livestock_projection_rasters(
                     baseline_livestock_dir=_baseline_dir / "livestock_emissions",
@@ -1376,6 +1423,8 @@ async def download_projection(
                     detail=f"Failed to generate hydrology inputs: {exc}",
                 )
 
+        align_model_grid(scenario_dir)
+
         # Compute per-area statistics.
         projected_df = pd.read_csv(projected_csv_path)
         for _schema in schemas_to_generate:
@@ -1418,8 +1467,6 @@ async def download_projection(
                     "n_areas": len(projected_df),
                 })
         summary = {"schemas": schema_entries, "assumptions": all_assumptions}
-
-        _validate_generated_projection_grids(reference_isoraster_path, scenario_dir)
 
         # Build the zip entirely in memory.
         zip_buffer = io.BytesIO()
@@ -1470,6 +1517,7 @@ async def download_projection(
 
 
 @router.post("/input/generate")
+@_session_operation
 async def generate_input_data_package(
     session_id: str,
     gids: str,
@@ -1480,22 +1528,29 @@ async def generate_input_data_package(
     hydrology_downscaling: bool = Query(
         False,
         description=(
-            "Enable experimental hydrology downscaling. Without a fine flow-direction TIFF, "
-            "only runoff and continuous fields are smoothed; discharge/routing remain coarse-derived."
+            "HIGHLY EXPERIMENTAL: not validated for production modelling or flow consistency. "
+            "Smooths runoff and continuous fields; discharge/routing remain coarse-derived. "
+            "When false, generated hydrology stays on the native 0.5-degree grid."
         ),
     ),
-    hydrology_flow_direction_tif: UploadFile | None = File(
+    hydro_raster: UploadFile | None = File(
         None,
         description=(
-            "Optional model-grid HydroSHEDS/ESRI D8 flow-direction GeoTIFF using codes "
-            "0,1,2,4,8,16,32,64,128. Raw finer data must first be network-aggregated "
-            "with flow accumulation; categorical resampling can create cycles."
+            "Reserved HIGHLY EXPERIMENTAL generic hydro_raster.tif input. Its scientific "
+            "meaning is not yet defined; supplying it currently returns 422. For complete "
+            "custom hydrology use /input/upload with file_id=hydrology and a ZIP."
         ),
     ),
 ):
+    if hydro_raster is not None:
+        await hydro_raster.close()
+        raise HTTPException(422, "hydro_raster processing is not yet defined. Upload complete hydrology via /input/upload.")
     areas = [x.strip() for x in gids.split(",") if x.strip()]
 
     session_dir = _DATA_DIR / session_id
+    if include_hydrology and source_info(session_dir / "baseline/hydrology").get("source") == "custom_uploaded":
+        if climate_model or hydrology_downscaling:
+            raise HTTPException(409, "Custom hydrology cannot be combined with climate_model or experimental raster controls.")
     logger.info(
         "Generating input package: session_id=%s gids=%s include_livestock=%s include_hydrology=%s include_qmra=%s climate_model=%s",
         session_id,
@@ -1507,10 +1562,7 @@ async def generate_input_data_package(
     )
 
     if os.path.isdir(session_dir):
-        fine_flow_direction_path = await _persist_fine_flow_direction(
-            hydrology_flow_direction_tif,
-            session_dir,
-        )
+        fine_flow_direction_path = None
         default_path = "baseline/"
         schemas_path = "schemas/"
         # Note: schemas are stored in the session folder so the generated
@@ -1620,6 +1672,11 @@ async def generate_input_data_package(
                         isodata_path=str(isodata_csv),
                         pop_raster_path=str(pop_raster),
                         out_dir=str(human_emissions_output_path),
+                        template_raster_path=(
+                            str(_template_raster)
+                            if _template_raster.is_file()
+                            else None
+                        ),
                     )
                 except Exception as spatial_err:
                     # Non-fatal: CSV generation already succeeded; log and continue.
@@ -1646,6 +1703,8 @@ async def generate_input_data_package(
                         hydrology_downscaling=hydrology_downscaling,
                         fine_flow_direction_path=fine_flow_direction_path,
                     )
+                except HTTPException:
+                    raise
                 except Exception as _hydro_err:
                     logger.exception(
                         "Baseline hydrology generation failed for session %s",
@@ -1710,6 +1769,8 @@ async def generate_input_data_package(
                         _ls_err,
                     )
 
+        except HTTPException:
+            raise
         except Exception as e:
             logger.exception(
                 "Input package generation failed: session_id=%s gids=%s",
@@ -1739,12 +1800,15 @@ async def generate_input_data_package(
                 "status": "failed",
                 "error": str(livestock_err),
             }
+    align_model_grid(session_dir / "baseline")
+    _input_download_cache_path(session_id).unlink(missing_ok=True)
     if include_hydrology:
         _hydro_dir = session_dir / "baseline" / "hydrology"
         if _hydro_dir.is_dir():
             d["hydrology"] = {
                 "status": "written",
                 "hydrology_dir": str(_hydro_dir),
+                "source": source_info(_hydro_dir),
             }
         else:
             d["hydrology"] = {
@@ -1772,6 +1836,7 @@ async def generate_input_data_package(
 
 
 @router.post("/input/generate/livestock")
+@_session_operation
 async def generate_livestock_input_data(session_id: str):
     session_dir = _DATA_DIR / session_id
     if not session_dir.is_dir():
@@ -1793,6 +1858,8 @@ async def generate_livestock_input_data(session_id: str):
         if src.is_file() and not dst.is_file():
             shutil.copyfile(src, dst)
 
+    align_model_grid(session_dir / "baseline")
+    _input_download_cache_path(session_id).unlink(missing_ok=True)
     return {
         "session_id": session_id,
         "status": "written",

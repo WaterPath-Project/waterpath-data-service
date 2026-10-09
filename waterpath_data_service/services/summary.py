@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import rasterio
+from waterpath_data_service.services.hydrology_upload import source_info
 
 
 DRIVER_METRIC_DEFS = [
@@ -300,6 +301,7 @@ def summarize_session(session_dir: Path) -> dict:
         "is_baseline": True,
         "wwtp_mode": baseline_mode,
         "metrics": baseline_metrics,
+        "hydrology": source_info(baseline_dir / "hydrology"),
     }]
 
     scenarios_dir = session_dir / "scenarios"
@@ -319,6 +321,7 @@ def summarize_session(session_dir: Path) -> dict:
                 "is_baseline": False,
                 "wwtp_mode": treatment_mode,
                 "metrics": metrics,
+                "hydrology": source_info(path / "hydrology"),
             })
     scenarios.extend(sorted(scenario_entries, key=lambda item: (int(item["year"]), item["name"])))
     return {

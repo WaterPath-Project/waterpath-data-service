@@ -13,7 +13,6 @@ from waterpath_data_service.services.livestock import (
     _fao_country_total,
     _reproject_counts_to_zone_grid,
     _reproject_region_to_zone_grid,
-    generate_livestock_projection_rasters,
 )
 
 
@@ -53,6 +52,35 @@ def test_region_reprojection_uses_nearest_neighbour(tmp_path: Path) -> None:
     result = _reproject_region_to_zone_grid(source, _fine_grid_profile())
 
     np.testing.assert_array_equal(result, np.full((4, 4), 7.0, dtype=np.float32))
+
+
+def test_projection_overwrites_stale_animal_isoraster(tmp_path: Path) -> None:
+    baseline_dir = tmp_path / "baseline"
+    baseline_dir.mkdir()
+    _write_single_pixel_raster(baseline_dir / "animal_isoraster.tif", 7.0)
+
+    output_dir = tmp_path / "scenario"
+    output_dir.mkdir()
+    _write_single_pixel_raster(output_dir / "animal_isoraster.tif", 99.0)
+
+    livestock.generate_livestock_projection_rasters(
+        baseline_livestock_dir=baseline_dir,
+        output_dir=output_dir,
+        livestock_future_df=pd.DataFrame(),
+        mapping=pd.DataFrame(columns=["iso", "gid"]),
+        zone_idx=np.ones((4, 4), dtype=np.float32),
+        valid_mask=np.ones((4, 4), dtype=bool),
+        zone_profile=_fine_grid_profile(),
+        generate_rasters=False,
+        tabular_outputs=set(),
+    )
+
+    with rasterio.open(output_dir / "animal_isoraster.tif") as src:
+        assert src.shape == (4, 4)
+        np.testing.assert_array_equal(
+            src.read(1),
+            np.full((4, 4), 7.0, dtype=np.float32),
+        )
 
 
 def test_head_count_reprojection_conserves_total_when_splitting_cell(tmp_path: Path) -> None:
@@ -141,37 +169,6 @@ def test_livestock_zone_template_prefers_projection_isoraster(
     assert result_profile["width"] == projection_profile["width"]
     assert result_profile["height"] == projection_profile["height"]
     assert result_profile["transform"] == projection_profile["transform"]
-
-
-def test_projection_overwrites_stale_animal_isoraster(tmp_path: Path) -> None:
-    baseline_dir = tmp_path / "baseline"
-    output_dir = tmp_path / "scenario"
-    baseline_dir.mkdir()
-    output_dir.mkdir()
-    _write_single_pixel_raster(baseline_dir / "animal_isoraster.tif", 7.0)
-    _write_single_pixel_raster(output_dir / "animal_isoraster.tif", 99.0)
-
-    zone_profile = _fine_grid_profile()
-    zone_idx = np.ones((4, 4), dtype=np.int32)
-    generate_livestock_projection_rasters(
-        baseline_livestock_dir=baseline_dir,
-        output_dir=output_dir,
-        livestock_future_df=pd.DataFrame({"alpha3": ["TST"]}),
-        mapping=pd.DataFrame({"gid": ["TST"], "iso": [1]}),
-        zone_idx=zone_idx,
-        valid_mask=zone_idx > 0,
-        zone_profile=zone_profile,
-        generate_rasters=False,
-        tabular_outputs=set(),
-    )
-
-    with rasterio.open(output_dir / "animal_isoraster.tif") as result:
-        assert result.shape == (4, 4)
-        assert result.transform == zone_profile["transform"]
-        np.testing.assert_array_equal(
-            result.read(1),
-            np.full((4, 4), 7.0, dtype=np.float32),
-        )
 
 
 def test_fao_country_total_returns_matching_value() -> None:

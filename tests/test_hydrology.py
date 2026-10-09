@@ -1,11 +1,70 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 import rasterio
 from affine import Affine
 from rasterio.transform import from_origin
 
 from waterpath_data_service.services import hydrology
+
+
+@pytest.mark.parametrize("temperature_fallback", [False, True])
+def test_default_generation_keeps_native_grid(tmp_path, monkeypatch, temperature_fallback):
+    import geopandas as gpd
+    from shapely.geometry import box
+
+    static = tmp_path / "static"
+    model = static / "hydrology" / "models" / "test_ssp126_2021_2030"
+    native_transform = from_origin(0, 1, 0.5, 0.5)
+    values = np.array([[1, 2], [3, 4]], dtype=np.float32)
+    for variable, filenames in hydrology._CANONICAL_MONTHLY_FILES.items():
+        if temperature_fallback and variable == "river_temperature":
+            continue
+        (model / variable).mkdir(parents=True)
+        for filename in filenames:
+            _write_test_raster(model / variable / filename, values, native_transform)
+    if temperature_fallback:
+        worldclim = tmp_path / "worldclim.tif"
+        with rasterio.open(
+            worldclim, "w", driver="GTiff", width=4, height=4, count=19,
+            dtype="float32", crs="EPSG:4326", transform=from_origin(0, 1, 0.25, 0.25),
+            nodata=-9999,
+        ) as raster:
+            raster.write(np.full((19, 4, 4), 20, dtype=np.float32))
+        monkeypatch.setattr(hydrology, "_worldclim_bioc_path", lambda *args: worldclim)
+    for relative in ("routing/flowdir.tif", "routing/flowacc.tif", "doc/doc.tif"):
+        path = static / "hydrology" / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_test_raster(path, values, native_transform)
+    reference = tmp_path / "isoraster.tif"
+    _write_test_raster(reference, np.ones((100, 100)), from_origin(0, 1, 0.01, 0.01))
+    reference_bytes = reference.read_bytes()
+    monkeypatch.setattr(
+        hydrology.gpd, "read_file",
+        lambda _: gpd.GeoDataFrame(geometry=[box(0.01, 0.01, 0.99, 0.99)], crs=4326),
+    )
+
+    result = hydrology.generate_hydrology_inputs(
+        tmp_path / "area.shp", static, tmp_path / "output",
+        reference_raster_path=reference,
+    )
+
+    assert result["downscaling"] == "disabled"
+    outputs = list((tmp_path / "output" / "hydrology").rglob("*.tif"))
+    assert len(outputs) == 75
+    for path in outputs:
+        with rasterio.open(path) as raster:
+            assert raster.transform == native_transform
+            assert raster.shape == (2, 2)
+            expected = (
+                np.full((2, 2), 20)
+                if temperature_fallback and path.parent.name == "river_temperature"
+                else values
+            )
+            np.testing.assert_array_equal(raster.read(1), expected)
+    assert result["source"]["warnings"]
+    assert reference.read_bytes() == reference_bytes
 
 
 def _write_test_raster(

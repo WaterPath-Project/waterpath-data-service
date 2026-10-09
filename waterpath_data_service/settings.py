@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     # volume in Docker so that generated files are written to the host.
     data_dir: Path = Path(__file__).parent / "data"
 
+    hydrology_upload_max_bytes: int = 512 * 1024 * 1024
+    hydrology_upload_expanded_bytes: int = 4 * 1024 * 1024 * 1024
+    hydrology_upload_max_pixels: int = 2_000_000
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_prefix="WATERPATH_DATA_SERVICE_",

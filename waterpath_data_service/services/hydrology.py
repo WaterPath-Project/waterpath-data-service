@@ -47,6 +47,7 @@ Model directory discovery:
 from __future__ import annotations
 
 import logging
+import json
 import re
 from pathlib import Path
 
@@ -849,8 +850,20 @@ def generate_hydrology_inputs(
     shapefile_path = Path(shapefile_path)
     static_data_dir = Path(static_data_dir)
     out_dir = Path(out_dir)
+    from waterpath_data_service.services.hydrology_upload import preserve_custom
+
+    custom = preserve_custom(
+        out_dir, ssp, climate_model, hydrology_downscaling,
+        fine_flow_direction_path if hydrology_downscaling else None,
+    )
+    if custom is not None:
+        return custom
+    emissions_reference = Path(reference_raster_path) if reference_raster_path else None
     reference_raster_path = Path(reference_raster_path) if reference_raster_path else None
     fine_flow_direction_path = Path(fine_flow_direction_path) if fine_flow_direction_path else None
+
+    if not hydrology_downscaling:
+        reference_raster_path = None
 
     if hydrology_downscaling and (
         reference_raster_path is None or not reference_raster_path.is_file()
@@ -979,7 +992,10 @@ def generate_hydrology_inputs(
                 out_dir=out_hydrology_dir,
                 ssp=ssp,
                 year=year,
-                reference_path=reference_raster_path,
+                reference_path=(
+                    reference_raster_path if hydrology_downscaling
+                    else out_hydrology_dir / "runoff" / "runoff_m01.tif"
+                ),
             )
             if len(fallback_files) != 12:
                 raise RuntimeError(
@@ -1089,6 +1105,38 @@ def generate_hydrology_inputs(
     # ------------------------------------------------------------------
     # Write assumptions.csv describing the data sources used
     # ------------------------------------------------------------------
+    from waterpath_data_service.services.hydrology_upload import REQUIRED_FILES, PROVENANCE
+
+    grid_signature = None
+    for relative in sorted(REQUIRED_FILES):
+        output = out_hydrology_dir / relative
+        if not output.is_file():
+            raise RuntimeError(f"Missing required hydrology output: {relative}")
+        with rasterio.open(output) as raster:
+            signature = (raster.crs, raster.transform, raster.width, raster.height)
+            if grid_signature is None:
+                grid_signature = signature
+            elif grid_signature != signature:
+                raise RuntimeError(f"Generated hydrology grid mismatch: {relative}")
+            if not hydrology_downscaling and (
+                raster.crs is None or raster.crs.to_epsg() != 4326
+                or not np.allclose(raster.res, (0.5, 0.5))
+            ):
+                raise RuntimeError(f"Native hydrology must remain on its 0.5-degree grid: {relative}")
+    warnings = []
+    if emissions_reference is not None and emissions_reference.is_file():
+        with rasterio.open(emissions_reference) as reference:
+            if (reference.crs, reference.transform, reference.width, reference.height) != grid_signature:
+                warnings.append("Hydrology and emissions grids differ. Mixed-grid GloWPa execution is not guaranteed.")
+    source = {
+        "source": "experimental_generated" if hydrology_downscaling else "native_generated",
+        "model": model_dir.name,
+        "grid": {"crs": str(grid_signature[0]), "resolution": [grid_signature[1].a, -grid_signature[1].e],
+                 "width": grid_signature[2], "height": grid_signature[3]},
+        "warnings": warnings,
+    }
+    result["source"] = source
+    (out_hydrology_dir / PROVENANCE).write_text(json.dumps(source, indent=2), encoding="utf-8")
     try:
         ssp_requested = ssp.strip().upper() if ssp else "baseline"
         ssp_code_used = _SSP_CODE_MAP.get(ssp_requested, "ssp126") if ssp else "baseline"
@@ -1122,6 +1170,14 @@ def generate_hydrology_inputs(
             },
         ]
 
+        assumptions_rows.append({
+            "id": "hydrology_grid", "scenario": ssp_requested,
+            "year": str(year) if year else "baseline", "admin_level": "all", "pathogen": "all",
+            "assumption": (
+                "HIGHLY EXPERIMENTAL hydrology processing; not validated for production modelling. "
+                if hydrology_downscaling else "Hydrology retained on the native 0.5-degree grid. "
+            ) + "Package preparation preserves both the emissions isoraster grid and the separate native hydrology grid.",
+        })
         if hydrology_downscaling:
             assumptions_rows.append({
                 "id": "hydrology_downscaling",
@@ -1157,10 +1213,9 @@ def generate_hydrology_inputs(
                         "downscaled experimentally as described in the hydrology_downscaling assumption. "
                         "Sub-cell detail is modeled rather than observed."
                         if hydrology_downscaling
-                        else "reprojected to the isoraster grid with nearest-neighbour resampling, so "
-                        "hydrology values are uniform (coarse) blocks copied from the overlapping source "
-                        "cell(s) and do not resolve sub-cell spatial variation. QMRA outputs derived from "
-                        "these rasters inherit the same resolution limitation."
+                        else "retained on the native 0.5-degree grid. Emissions and QMRA grids are "
+                        "unchanged and may not align with hydrology. Mixed-grid GloWPa execution "
+                        "is not guaranteed."
                     )
                 ),
             })

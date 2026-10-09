@@ -1,4 +1,111 @@
-# Lightweight Hydrology Downscaling
+# Hydrology Inputs and Experimental Downscaling
+
+## Default Behavior
+
+Generated hydrology is clipped on its native 0.5-degree EPSG:4326 grid. It is not
+resampled onto the emissions isoraster unless experimental downscaling is explicitly
+enabled. The river-temperature fallback is aligned to the clipped native hydrology
+grid. The isoraster, not hydrology, dictates the final model grid. Livestock and
+continuous inputs are prepared against it without changing its resolution.
+Hydrology is retained as a separate, internally consistent grid. Native D8 and
+hydraulic rasters are never blindly resampled to the emissions isoraster.
+Downloads allow mixed grids without resampling the stored rasters. The downstream
+tool or user must provide any two-grid coupling and validate model compatibility;
+download success is not a readiness check for GloWPa.
+Administrative clipping also does not reconstruct missing upstream pathogen loads.
+
+## Custom Hydrology Upload
+
+Use `POST /api/data/input/upload` with multipart `file`, `session_id` and
+`file_id=hydrology`. Only a `.zip` with valid ZIP contents is accepted.
+Optional paired `ssp` and `year` target an existing `scenarios/{SSP}_{year}`;
+otherwise the target is `baseline`. The session and study-area geography must exist.
+
+The archive must have exactly this structure (each monthly range means 12 files):
+
+```text
+hydrology/
+   runoff/runoff_m01.tif ... runoff_m12.tif
+   discharge/discharge_m01.tif ... discharge_m12.tif
+   river_depth/river_depth_m01.tif ... river_depth_m12.tif
+   river_restime/river_restime_m01.tif ... river_restime_m12.tif
+   ssrd/ssrd_m01.tif ... ssrd_m12.tif
+   river_temperature/river_temperature_m01.tif ... river_temperature_m12.tif
+   routing/flowdir.tif
+   routing/flowacc.tif
+   doc.tif
+```
+
+All 75 rasters are required; no static-data fallback or merging is performed.
+The files must be readable single-band GeoTIFFs, north-up EPSG:4326 with square
+pixels, sharing exactly the same transform and dimensions. Their extent must
+cover the study area. Any internally consistent resolution is accepted, without
+resampling. Variable-specific nodata masks are allowed; every raster needs valid
+data. Valid-data coverage and scientific calibration remain the user's responsibility.
+
+Required units:
+
+| Variable | Units |
+|---|---|
+| runoff | mm/day |
+| discharge | m3/s |
+| river_depth | m |
+| river_restime | days |
+| ssrd | kJ/m2/day |
+| river_temperature | degC |
+| doc | mg/L |
+| flowacc | upstream_cell_count |
+| flowdir | ESRI_D8 |
+
+D8 codes are 0, 1, 2, 4, 8, 16, 32, 64 and 128, with 0 denoting an outlet/sink.
+Cycles are rejected. Accumulation must be nonnegative integer-valued counts;
+it is not forced to equal locally recomputed counts because upstream contributing
+cells may lie outside the supplied extent. Negative values are rejected except
+for temperature. Unmasked infinities/NaNs are rejected.
+
+Optional `hydrology/metadata.json` accepts only `source`, `period` and `notes`
+strings plus an optional `units` object matching every entry in the table exactly.
+Other files, including uploaded `source.json`, are rejected. The service writes
+its own `source.json` with the archive digest, grid, uploader declarations and
+warnings. Declarations are not evidence of scientific validation.
+
+Uploads stage the destination package with the new hydrology and prepare its
+emissions inputs against the unchanged isoraster, validate the hydrology grid and
+routing, then replace the target. Hydrology remains unchanged on its supplied grid.
+Alignment and validation failures leave the target untouched; failed promotion
+restores the old directory. Conflicting session writes receive 409. Downloads are invalidated
+after a successful replacement, and summaries read current provenance and rasters.
+Direct scenario uploads take precedence over custom baseline data. Otherwise,
+custom baseline data is copied unchanged when scenario hydrology is requested.
+Uploading baseline hydrology also refreshes existing scenarios that inherit it and
+prepares their emissions rasters against their existing isoraster. Direct scenario
+uploads may use a different hydrology grid from the scenario isoraster.
+Supplying climate-model or
+experimental controls for custom hydrology returns 409.
+
+Limits are configurable via the usual `WATERPATH_DATA_SERVICE_` settings prefix:
+
+| Setting | Default |
+|---|---|
+| HYDROLOGY_UPLOAD_MAX_BYTES | 536870912 (512 MiB) |
+| HYDROLOGY_UPLOAD_EXPANDED_BYTES | 4294967296 (4 GiB, also total decoded raster bytes) |
+| HYDROLOGY_UPLOAD_MAX_PIXELS | 2000000 per raster |
+
+At most 100 ZIP entries are accepted; metadata is limited to 64 KiB. ZIP members
+must use stored or deflate compression. Unsafe paths, duplicates, symlinks,
+encrypted members and unexpected files are rejected. Limits apply to processing
+after multipart ingestion; configure an HTTP proxy/body limit as well for untrusted
+internet uploads. A process crash may leave `.input-write-lock` in the session;
+remove it only after confirming no input operation is still running.
+
+Error responses: 404 unknown session/target, 415 wrong upload type, 422 invalid
+parameters/archive/raster data, 413 resource limits, 409 conflicting operations or
+source options. Validation errors identify the offending member where possible.
+
+## Experimental Status
+
+**HIGHLY EXPERIMENTAL: not validated for production modelling or flow consistency.**
+This mode is not a calibrated replacement for the native hydrology dataset.
 
 ## Purpose
 
@@ -7,9 +114,9 @@ The ISIMIP3b hydrology inputs used by WaterPath have a native resolution of
 each source value into many model cells, producing visible rectangular blocks
 in discharge and therefore in concentration.
 
-This method reduces those discontinuities without claiming to create new
-hydrological observations. It is suitable as an interim approach when a finer
-DEM-based rainfall-runoff model is unavailable.
+The optional method below explores finer-grid processing without creating new
+hydrological observations. Partial smoothing alone does not repair discharge or
+routing consistency.
 
 ## Method
 
@@ -26,7 +133,8 @@ DEM-based rainfall-runoff model is unavailable.
    f_i = \frac{R_i A_i}{\sum_{j \in i} r_j a_j}, \qquad r'_j = f_i r_j
    $$
 
-   Here $R_i$ and $A_i$ are the original runoff depth and area, while $r_j$ and
+   Here $R_i$ is the original runoff depth and $A_i$ is the represented target
+   area within the source cell, while $r_j$ and
    $a_j$ are the interpolated depth and area of target cell $j$ within source
    cell $i$.
 4. Route the corrected target-grid runoff over a finer, hydrologically
@@ -41,13 +149,16 @@ calendar convention, CRS, extent, nodata mask, and monthly timestamps.
 
 ## API Controls
 
-Hydrology generation exposes two optional fields on `/input/generate` and
-`/projections/generate`:
+Both `/input/generate` and `/projections/generate` expose
+`hydrology_downscaling` (default `false`). Custom datasets cannot be combined
+with experimental controls.
 
-- `hydrology_downscaling` (boolean, default `false`) enables this experimental
-   processing. Leaving it disabled preserves the existing nearest-neighbour
-   behavior.
-- `hydrology_flow_direction_tif` optionally accepts a finer-than-0.5-degree
+- Leaving downscaling disabled retains the native 0.5-degree grid.
+- `/input/generate` now exposes `hydro_raster` for a future generic
+   `hydro_raster.tif` contract. Uploading it currently returns 422; it is not
+   interpreted as D8. The old baseline `hydrology_flow_direction_tif` parameter
+   is no longer part of this endpoint's contract.
+- `/projections/generate` retains `hydrology_flow_direction_tif`, accepting a finer-than-0.5-degree
    HydroSHEDS/ESRI D8 GeoTIFF using codes `0, 1, 2, 4, 8, 16, 32, 64, 128`.
    It should already match the case-study grid. Raw higher-resolution direction
    codes must first be aggregated with the matching HydroSHEDS flow-accumulation

@@ -2,6 +2,24 @@
 
 ## Overview
 
+The emissions isoraster defines the final model grid and is not coarsened to
+accommodate hydrology. Package preparation aligns incompatible livestock,
+temperature and continuous inputs to this grid. Compatible inputs are unchanged.
+Hydrology remains on its own internally consistent grid. Preparation does not
+resample D8, alter hydraulic rasters, or degrade the isoraster. Downloads allow
+mixed-grid packages for downstream processing; two-grid coupling and model
+compatibility are the downstream tool's or user's responsibility.
+The auto-resolution rules below apply when initially creating
+an isoraster; subsequent generation preserves its grid.
+
+Final alignment resamples population and animal counts through density and cell
+area, preserving totals over a fully covered source without redistributing counts
+excluded by cropping. Categorical identifiers/treatment codes use mode when
+coarsening and nearest-neighbour when refining; continuous fields use average
+or bilinear respectively. This cannot retain sub-cell administrative detail,
+nor does compatible geometry establish hydrological or epidemiological accuracy.
+See [hydrology inputs](HYDROLOGY_ADDITIONAL_DOWNSCALING.md).
+
 `prepare_spatial_inputs` (in `waterpath_data_service/services/prepare_spatial.py`)
 produces three output GeoTIFFs for every scenario:
 
